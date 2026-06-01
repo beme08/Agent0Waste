@@ -1,0 +1,17 @@
+[package]
+name = "agent0waste"
+version = "0.1.0"
+edition = "2021"
+authors = ["beme08"]
+description = "Local-first waste scanner for AI agent CLIs (Hermes, Claude Code, etc.)"
+license = "MIT"
+repository = "https://github.com/beme08/Agent0Waste"
+readme = "README.md"
+keywords = ["ai", "agents", "cli", "local", "privacy"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
