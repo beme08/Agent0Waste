@@ -1,0 +1,798 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;800&display=swap');
+
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html, body {
+        margin: 0;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: #0a0a0f;
+        font-family: 'Inter', sans-serif;
+      }
+
+      /* ── Background grid ── */
+      .bg-grid {
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(rgba(0,255,170,0.03) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(0,255,170,0.03) 1px, transparent 1px);
+        background-size: 60px 60px;
+      }
+
+      /* ── Scan line overlay ── */
+      .scan-lines {
+        position: absolute;
+        inset: 0;
+        background: repeating-linear-gradient(
+          0deg,
+          transparent,
+          transparent 2px,
+          rgba(0,0,0,0.08) 2px,
+          rgba(0,0,0,0.08) 4px
+        );
+        pointer-events: none;
+        z-index: 1;
+      }
+
+      /* ── Scene 1: Title Card ── */
+      #s1 {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        background: #0a0a0f;
+        z-index: 2;
+      }
+      #s1-logo-wrap {
+        display: flex;
+        align-items: center;
+        gap: 24px;
+      }
+      #s1-icon {
+        width: 80px;
+        height: 80px;
+      }
+      #s1-logo {
+        font-size: 88px;
+        font-weight: 800;
+        color: #00ffaa;
+        letter-spacing: -2px;
+      }
+      #s1-tagline {
+        font-size: 32px;
+        color: #8a8a9a;
+        font-weight: 400;
+      }
+      #s1-badge {
+        font-size: 16px;
+        color: #0a0a0f;
+        background: #00ffaa;
+        padding: 8px 24px;
+        border-radius: 6px;
+        font-weight: 700;
+        font-family: 'JetBrains Mono', monospace;
+        margin-top: 16px;
+      }
+      #s1-sub {
+        font-size: 16px;
+        color: #5a5a6a;
+        font-family: 'JetBrains Mono', monospace;
+        margin-top: 8px;
+      }
+
+      /* ── Scene 2: Scan ── */
+      #s2 {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        padding: 80px 120px;
+        gap: 24px;
+        background: #0a0a0f;
+        z-index: 2;
+      }
+      .step-label {
+        font-size: 18px;
+        color: #00ffaa;
+        font-weight: 700;
+        font-family: 'JetBrains Mono', monospace;
+        text-transform: uppercase;
+        letter-spacing: 3px;
+      }
+      .step-title {
+        font-size: 48px;
+        color: #fff;
+        font-weight: 800;
+      }
+      .term-block {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 17px;
+        line-height: 1.8;
+        color: #c8c8d0;
+        background: #12121a;
+        border: 1px solid #1e1e2e;
+        border-radius: 12px;
+        padding: 32px 40px;
+        margin-top: 8px;
+        max-height: 320px;
+        overflow: hidden;
+      }
+      .term-line {
+        white-space: pre;
+        opacity: 0;
+      }
+      .term-prompt { color: #00ffaa; }
+      .term-cmd { color: #fff; font-weight: 700; }
+      .term-key { color: #ffaa00; }
+      .term-dim { color: #5a5a6a; }
+      .term-ok { color: #00ffaa; }
+      .term-warn { color: #ffaa00; }
+      .term-err { color: #ff4444; }
+      .cursor-blink {
+        display: inline-block;
+        width: 10px;
+        height: 20px;
+        background: #00ffaa;
+        vertical-align: middle;
+        margin-left: 2px;
+      }
+      .eff-bar-wrap {
+        margin-top: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .eff-row {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+      }
+      .eff-label {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 16px;
+        color: #8a8a9a;
+        width: 200px;
+      }
+      .eff-bar {
+        height: 28px;
+        border-radius: 6px;
+        width: 600px;
+        position: relative;
+        overflow: hidden;
+      }
+      .eff-bar-bg {
+        position: absolute;
+        inset: 0;
+        background: #1a1a2a;
+        border-radius: 6px;
+      }
+      .eff-bar-fill {
+        position: absolute;
+        top: 0; left: 0; bottom: 0;
+        border-radius: 6px;
+        width: 0%;
+      }
+      .eff-bar-glow {
+        position: absolute;
+        top: -4px; left: -4px; right: -4px; bottom: -4px;
+        border-radius: 10px;
+        filter: blur(8px);
+        opacity: 0;
+      }
+      .eff-pct {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 20px;
+        font-weight: 700;
+        width: 60px;
+      }
+
+      /* ── Scene 3: Report ── */
+      #s3 {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        padding: 80px 120px;
+        gap: 20px;
+        background: #0a0a0f;
+        z-index: 2;
+      }
+      .waste-card {
+        background: #12121a;
+        border: 1px solid #1e1e2e;
+        border-radius: 12px;
+        padding: 24px 32px;
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        gap: 24px;
+      }
+      .waste-card-left {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        flex: 1;
+      }
+      .waste-severity {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 2px;
+        padding: 4px 12px;
+        border-radius: 4px;
+        width: fit-content;
+      }
+      .sev-high {
+        color: #ff4444;
+        background: #ff444420;
+        border: 1px solid #ff444440;
+      }
+      .sev-medium {
+        color: #ffaa00;
+        background: #ffaa0020;
+        border: 1px solid #ffaa0040;
+      }
+      .sev-low {
+        color: #00aaff;
+        background: #00aaff20;
+        border: 1px solid #00aaff40;
+      }
+      .waste-icon {
+        width: 48px;
+        height: 48px;
+        flex-shrink: 0;
+      }
+      .waste-type {
+        font-size: 22px;
+        color: #fff;
+        font-weight: 700;
+      }
+      .waste-desc {
+        font-size: 15px;
+        color: #8a8a9a;
+        font-family: 'JetBrains Mono', monospace;
+      }
+      .waste-savings {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 16px;
+        color: #00ffaa;
+        font-weight: 700;
+        white-space: nowrap;
+        text-align: right;
+        min-width: 180px;
+      }
+      .waste-tokens {
+        font-size: 13px;
+        color: #5a5a6a;
+        font-family: 'JetBrains Mono', monospace;
+      }
+
+      /* ── Scene 4: History ── */
+      #s4 {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        padding: 80px 120px;
+        gap: 24px;
+        background: #0a0a0f;
+        z-index: 2;
+      }
+      .history-table {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 17px;
+        background: #12121a;
+        border: 1px solid #1e1e2e;
+        border-radius: 12px;
+        padding: 28px 36px;
+        margin-top: 8px;
+      }
+      .history-header {
+        display: grid;
+        grid-template-columns: 320px 100px 80px 80px 180px;
+        gap: 16px;
+        color: #5a5a6a;
+        font-size: 14px;
+        text-transform: uppercase;
+        letter-spacing: 2px;
+        padding-bottom: 16px;
+        border-bottom: 1px solid #1e1e2e;
+        margin-bottom: 12px;
+      }
+      .history-row {
+        display: grid;
+        grid-template-columns: 320px 100px 80px 80px 180px;
+        gap: 16px;
+        padding: 8px 0;
+        color: #c8c8d0;
+        border-bottom: 1px solid rgba(255,255,255,0.03);
+      }
+      .history-row .eff {
+        color: #00ffaa;
+        font-weight: 700;
+      }
+      .history-row .eff-warn { color: #ffaa00; }
+      .trend-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: #00ffaa;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 18px;
+        font-weight: 700;
+        margin-top: 16px;
+      }
+      .sparkline-wrap {
+        margin-top: 16px;
+      }
+
+      /* ── Scene 5: Savings ── */
+      #s5 {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 28px;
+        background: #0a0a0f;
+        z-index: 2;
+      }
+      .savings-title {
+        font-size: 24px;
+        color: #8a8a9a;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 4px;
+      }
+      .savings-hero {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+      }
+      .savings-number {
+        font-size: 140px;
+        font-weight: 800;
+        color: #00ffaa;
+        font-variant-numeric: tabular-nums;
+        line-height: 1;
+      }
+      .savings-unit {
+        font-size: 36px;
+        color: #8a8a9a;
+        font-weight: 400;
+      }
+      .savings-row {
+        display: flex;
+        gap: 80px;
+        margin-top: 8px;
+      }
+      .savings-stat {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+      }
+      .stat-val {
+        font-size: 48px;
+        font-weight: 800;
+        color: #fff;
+        font-variant-numeric: tabular-nums;
+      }
+      .stat-label {
+        font-size: 14px;
+        color: #5a5a6a;
+        font-family: 'JetBrains Mono', monospace;
+        text-transform: uppercase;
+        letter-spacing: 2px;
+      }
+      .stat-positive { color: #00ffaa; }
+      .stat-dollar { color: #00aaff; }
+
+      /* ── Scene 6: CTA ── */
+      #s6 {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 32px;
+        background: #0a0a0f;
+        z-index: 2;
+      }
+      .cta-cmd-block {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 42px;
+        color: #00ffaa;
+        background: #00ffaa10;
+        border: 2px solid #00ffaa40;
+        border-radius: 16px;
+        padding: 32px 56px;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+      }
+      .cta-cmd-prompt {
+        color: #5a5a6a;
+        font-size: 42px;
+      }
+      .cta-sub {
+        font-size: 22px;
+        color: #8a8a9a;
+        text-align: center;
+      }
+      .cta-links {
+        display: flex;
+        gap: 24px;
+        margin-top: 8px;
+      }
+      .cta-link {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 16px;
+        color: #00aaff;
+        text-decoration: none;
+        padding: 8px 16px;
+        border: 1px solid #00aaff40;
+        border-radius: 8px;
+      }
+      .cta-logo {
+        font-size: 48px;
+        font-weight: 800;
+        color: #00ffaa;
+        margin-top: 24px;
+      }
+
+      /* ── Scene container ── */
+      .scene {
+        position: absolute;
+        inset: 0;
+      }
+
+      /* ── Progress bar ── */
+      #progress-bar {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        height: 3px;
+        background: #00ffaa;
+        width: 0%;
+        z-index: 10;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="bg-grid"></div>
+    <div class="scan-lines"></div>
+    <div id="progress-bar"></div>
+
+    <div
+      id="root"
+      data-composition-id="main"
+      data-start="0"
+      data-duration="28"
+      data-width="1920"
+      data-height="1080"
+    >
+
+      <!-- ── Scene 1: Title Card (0–4s) ── -->
+      <div id="s1" class="clip scene" data-start="0" data-duration="4" data-track-index="1">
+        <div id="s1-logo-wrap">
+          <svg id="s1-icon" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="8" y="8" width="64" height="64" rx="12" stroke="#00ffaa" stroke-width="3"/>
+            <path d="M24 40 L36 52 L56 28" stroke="#00ffaa" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="40" cy="40" r="32" stroke="#00ffaa" stroke-width="1" stroke-dasharray="4 4" opacity="0.3"/>
+          </svg>
+          <div id="s1-logo">Agent0Waste</div>
+        </div>
+        <div id="s1-tagline">Local Token Waste Scanner</div>
+        <div id="s1-badge">v0.1.0-alpha</div>
+        <div id="s1-sub">for Hermes Agent &amp; local-first CLI tools</div>
+      </div>
+
+      <!-- ── Scene 2: Scan (4.5–10.5s) ── -->
+      <div id="s2" class="clip scene" data-start="4.5" data-duration="6" data-track-index="1">
+        <div id="s2-step" class="step-label">Step 01 / Scan</div>
+        <div id="s2-title" class="step-title">Analyzing your profiles</div>
+        <div id="s2-term" class="term-block">
+          <div id="term-line-0" class="term-line"><span class="term-prompt">$ </span><span class="term-cmd">agent0waste scan</span><span class="cursor-blink" id="term-cursor"></span></div>
+          <div id="term-line-1" class="term-line"><span class="term-dim">Scanning 8 Hermes profiles...</span></div>
+          <div id="term-line-2" class="term-line">&nbsp;</div>
+          <div id="term-line-3" class="term-line"><span class="term-dim">Profile          Tools  Cost/mo  Status</span></div>
+          <div id="term-line-4" class="term-line"><span class="term-dim">──────────────────────────────────────────</span></div>
+          <div id="term-line-5" class="term-line"><span class="term-ok">  hermes-cto      0     $0.00   clean ✓</span></div>
+          <div id="term-line-6" class="term-line"><span class="term-ok">  hermes-sec      0     $0.00   clean ✓</span></div>
+          <div id="term-line-7" class="term-line"><span class="term-warn">  hermes-core    13    $4.20   2 expensive</span></div>
+          <div id="term-line-8" class="term-line"><span class="term-ok">  hermes-research  0     $0.00   clean ✓</span></div>
+          <div id="term-line-9" class="term-line"><span class="term-ok">  hermes-ops       0     $0.00   clean ✓</span></div>
+          <div id="term-line-10" class="term-line"><span class="term-ok">  hermes-dev       0     $0.00   clean ✓</span></div>
+          <div id="term-line-11" class="term-line"><span class="term-ok">  hermes-data      0     $0.00   clean ✓</span></div>
+          <div id="term-line-12" class="term-line"><span class="term-ok">  hermes-ml        0     $0.00   clean ✓</span></div>
+          <div id="term-line-13" class="term-line">&nbsp;</div>
+          <div id="term-line-14" class="term-line"><span class="term-dim">Scan complete. 1 profile flagged.</span></div>
+        </div>
+        <div id="s2-eff" class="eff-bar-wrap">
+          <div class="eff-row">
+            <span class="eff-label">Current efficiency</span>
+            <div class="eff-bar">
+              <div class="eff-bar-bg"></div>
+              <div id="eff-glow-now" class="eff-bar-glow" style="background: #ffaa00;"></div>
+              <div id="eff-fill-now" class="eff-bar-fill" style="background: #ffaa00;"></div>
+            </div>
+            <span id="eff-pct-now" class="eff-pct" style="color: #ffaa00;">0%</span>
+          </div>
+          <div class="eff-row">
+            <span class="eff-label">After cleanup</span>
+            <div class="eff-bar">
+              <div class="eff-bar-bg"></div>
+              <div id="eff-glow-after" class="eff-bar-glow" style="background: #00ffaa;"></div>
+              <div id="eff-fill-after" class="eff-bar-fill" style="background: #00ffaa;"></div>
+            </div>
+            <span id="eff-pct-after" class="eff-pct" style="color: #00ffaa;">0%</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Scene 3: Report (11–16s) ── -->
+      <div id="s3" class="clip scene" data-start="11" data-duration="5" data-track-index="1">
+        <div id="s3-step" class="step-label">Step 02 / Report</div>
+        <div id="s3-title" class="step-title">Waste identified</div>
+        <div id="s3-card1" class="waste-card">
+          <svg class="waste-icon" viewBox="0 0 48 48" fill="none">
+            <rect x="4" y="4" width="40" height="40" rx="8" stroke="#ff4444" stroke-width="2"/>
+            <path d="M24 14 L24 26 M24 32 L24 32.5" stroke="#ff4444" stroke-width="3" stroke-linecap="round"/>
+          </svg>
+          <div class="waste-card-left">
+            <div class="waste-severity sev-high">High</div>
+            <div class="waste-type">redundant_remote_calls</div>
+            <div class="waste-desc">web + browser tools enabled on local-only profile → 12-18k tokens/month wasted on remote round-trips</div>
+          </div>
+          <div>
+            <div class="waste-savings">$4.20/mo</div>
+            <div class="waste-tokens">~15k tokens</div>
+          </div>
+        </div>
+        <div id="s3-card2" class="waste-card">
+          <svg class="waste-icon" viewBox="0 0 48 48" fill="none">
+            <rect x="4" y="4" width="40" height="40" rx="8" stroke="#ffaa00" stroke-width="2"/>
+            <circle cx="24" cy="24" r="10" stroke="#ffaa00" stroke-width="2"/>
+            <path d="M20 24 L23 27 L28 21" stroke="#ffaa00" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <div class="waste-card-left">
+            <div class="waste-severity sev-medium">Medium</div>
+            <div class="waste-type">tool_bloat</div>
+            <div class="waste-desc">13 tools enabled on hermes-core → bloated context window, slower prompt resolution</div>
+          </div>
+          <div>
+            <div class="waste-savings">$0.80/mo</div>
+            <div class="waste-tokens">~3k tokens</div>
+          </div>
+        </div>
+        <div id="s3-card3" class="waste-card">
+          <svg class="waste-icon" viewBox="0 0 48 48" fill="none">
+            <rect x="4" y="4" width="40" height="40" rx="8" stroke="#00aaff" stroke-width="2"/>
+            <path d="M16 24 L22 30 L32 18" stroke="#00aaff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <div class="waste-card-left">
+            <div class="waste-severity sev-low">Low</div>
+            <div class="waste-type">config_bloat</div>
+            <div class="waste-desc">Verbose system prompt + unused skill references → ~500 tokens per request</div>
+          </div>
+          <div>
+            <div class="waste-savings">$0.15/mo</div>
+            <div class="waste-tokens">~500 tokens</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Scene 4: History (16.5–21s) ── -->
+      <div id="s4" class="clip scene" data-start="16.5" data-duration="4.5" data-track-index="1">
+        <div id="s4-step" class="step-label">Step 03 / History</div>
+        <div id="s4-title" class="step-title">Track over time</div>
+        <div id="s4-table" class="history-table">
+          <div class="history-header">
+            <span>Time</span><span>Eff%</span><span>Profiles</span><span>Waste</span><span>Model</span>
+          </div>
+          <div id="s4-r1" class="history-row">
+            <span>2026-06-01 18:00</span><span class="eff-warn">62%</span><span>8</span><span>3</span><span>grok-4.3</span>
+          </div>
+          <div id="s4-r2" class="history-row">
+            <span>2026-06-01 21:13</span><span class="eff-warn">68%</span><span>8</span><span>2</span><span>qwen3-27b</span>
+          </div>
+          <div id="s4-r3" class="history-row">
+            <span>2026-06-01 21:53</span><span class="eff-warn">70%</span><span>8</span><span>2</span><span>grok-4.3</span>
+          </div>
+          <div id="s4-r4" class="history-row">
+            <span>2026-06-01 22:04</span><span class="eff">70%</span><span>8</span><span>2</span><span>grok-4.3</span>
+          </div>
+          <div id="s4-r5" class="history-row">
+            <span>2026-06-01 22:04</span><span class="eff">98%</span><span>8</span><span>0</span><span>grok-4.3</span>
+          </div>
+        </div>
+        <div id="s4-trend" class="trend-badge">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" style="vertical-align:middle;margin-right:4px;">
+            <path d="M4 16 L10 10 L14 14 L20 8" stroke="#00ffaa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M16 8 L20 8 L20 12" stroke="#00ffaa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Trend: +28% after cleanup (last 5 scans)
+        </div>
+      </div>
+
+      <!-- ── Scene 5: Savings (21.5–25.5s) ── -->
+      <div id="s5" class="clip scene" data-start="21.5" data-duration="4" data-track-index="1">
+        <div id="s5-label" class="savings-title">Monthly savings after cleanup</div>
+        <div id="s5-amount" class="savings-hero">
+          <span id="s5-dollar" class="savings-number" style="color:#00aaff;font-size:64px;">$</span>
+          <span id="s5-num" class="savings-number">0</span><span class="savings-unit">/mo</span>
+        </div>
+        <div class="savings-row">
+          <div class="savings-stat">
+            <span id="s5-tokens" class="stat-val stat-positive">0</span>
+            <span class="stat-label">k tokens saved</span>
+          </div>
+          <div class="savings-stat">
+            <span id="s5-speed" class="stat-val stat-positive">+0%</span>
+            <span class="stat-label">faster startup</span>
+          </div>
+          <div class="savings-stat">
+            <span id="s5-ram" class="stat-val stat-positive">0</span>
+            <span class="stat-label">MB RAM freed</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Scene 6: CTA (25.5–28s) ── -->
+      <div id="s6" class="clip scene" data-start="25.5" data-duration="2.5" data-track-index="1">
+        <div id="s6-title" class="savings-title" style="font-size:20px;">Try it now</div>
+        <div id="s6-cmd" class="cta-cmd-block">
+          <span class="cta-cmd-prompt">$</span>
+          <span>agent0waste scan --fix</span>
+        </div>
+        <div id="s6-sub" class="cta-sub">Open source · Local-first · Zero telemetry</div>
+        <div id="s6-links" class="cta-links">
+          <span class="cta-link">github.com/beme08/Agent0Waste</span>
+          <span class="cta-link">agent0waste.dev</span>
+        </div>
+        <div id="s6-logo" class="cta-logo">Agent0Waste</div>
+      </div>
+
+    </div>
+
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+
+      /* ── Progress bar ── */
+      tl.to("#progress-bar", { width: "100%", duration: 28, ease: "none" }, 0);
+
+      /* ── Scene 1: Title Card ── */
+      tl.from("#s1-icon", { scale: 0, rotation: -180, duration: 0.8, ease: "back.out(1.7)" }, 0.3);
+      tl.from("#s1-logo", { x: 40, opacity: 0, duration: 0.6, ease: "power3.out" }, 0.5);
+      tl.from("#s1-tagline", { y: 30, opacity: 0, duration: 0.6, ease: "power2.out" }, 0.8);
+      tl.from("#s1-badge", { y: 20, opacity: 0, duration: 0.4, ease: "power2.out" }, 1.1);
+      tl.from("#s1-sub", { y: 15, opacity: 0, duration: 0.4, ease: "power2.out" }, 1.3);
+      tl.to("#s1", { opacity: 0, duration: 0.4, ease: "power2.in" }, 3.8);
+
+      /* ── Scene 2: Scan ── */
+      tl.from("#s2", { opacity: 0, duration: 0.3 }, 4.5);
+      tl.from("#s2-step", { x: -30, opacity: 0, duration: 0.4, ease: "expo.out" }, 4.8);
+      tl.from("#s2-title", { y: 20, opacity: 0, duration: 0.5, ease: "power3.out" }, 5.0);
+
+      // Terminal typing: reveal lines one by one
+      for (let i = 0; i <= 14; i++) {
+        tl.to("#term-line-" + i, { opacity: 1, duration: 0.08 }, 5.3 + i * 0.18);
+      }
+      tl.to("#term-cursor", { opacity: 0, duration: 0.2 }, 5.3 + 15 * 0.18);
+
+      // Efficiency bars
+      tl.from("#s2-eff", { y: 20, opacity: 0, duration: 0.4, ease: "power2.out" }, 7.5);
+      tl.to("#eff-fill-now", { width: "70%", duration: 1.0, ease: "power2.out" }, 7.8);
+      tl.to("#eff-glow-now", { opacity: 0.3, duration: 0.5, ease: "power2.out" }, 7.8);
+      tl.to("#eff-pct-now", { innerText: "70%", duration: 1.0, ease: "none",
+        snap: { innerText: 1 },
+        onUpdate: function() {
+          const p = Math.round(gsap.getProperty("#eff-fill-now", "width") / 600 * 100);
+          document.getElementById("eff-pct-now").textContent = p + "%";
+        }
+      }, 7.8);
+      tl.to("#eff-fill-after", { width: "98%", duration: 1.0, ease: "power2.out" }, 8.2);
+      tl.to("#eff-glow-after", { opacity: 0.4, duration: 0.5, ease: "power2.out" }, 8.2);
+      tl.to("#eff-pct-after", { innerText: "98%", duration: 1.0, ease: "none",
+        snap: { innerText: 1 },
+        onUpdate: function() {
+          const p = Math.round(gsap.getProperty("#eff-fill-after", "width") / 600 * 100);
+          document.getElementById("eff-pct-after").textContent = p + "%";
+        }
+      }, 8.2);
+      tl.to("#s2", { opacity: 0, duration: 0.3 }, 10.2);
+
+      /* ── Scene 3: Report ── */
+      tl.from("#s3", { opacity: 0, duration: 0.3 }, 11);
+      tl.from("#s3-step", { x: -30, opacity: 0, duration: 0.4, ease: "expo.out" }, 11.3);
+      tl.from("#s3-title", { y: 20, opacity: 0, duration: 0.5, ease: "power3.out" }, 11.5);
+      tl.from("#s3-card1", { x: -60, opacity: 0, duration: 0.6, ease: "power3.out" }, 11.9);
+      tl.from("#s3-card2", { x: -60, opacity: 0, duration: 0.6, ease: "power3.out" }, 12.3);
+      tl.from("#s3-card3", { x: -60, opacity: 0, duration: 0.6, ease: "power3.out" }, 12.7);
+      tl.to("#s3", { opacity: 0, duration: 0.3 }, 15.7);
+
+      /* ── Scene 4: History ── */
+      tl.from("#s4", { opacity: 0, duration: 0.3 }, 16.5);
+      tl.from("#s4-step", { x: -30, opacity: 0, duration: 0.4, ease: "expo.out" }, 16.8);
+      tl.from("#s4-title", { y: 20, opacity: 0, duration: 0.5, ease: "power3.out" }, 17.0);
+      tl.from("#s4-table", { y: 30, opacity: 0, duration: 0.6, ease: "power2.out" }, 17.3);
+      tl.from("#s4-r1", { x: -20, opacity: 0, duration: 0.25, ease: "power2.out" }, 17.8);
+      tl.from("#s4-r2", { x: -20, opacity: 0, duration: 0.25, ease: "power2.out" }, 18.0);
+      tl.from("#s4-r3", { x: -20, opacity: 0, duration: 0.25, ease: "power2.out" }, 18.2);
+      tl.from("#s4-r4", { x: -20, opacity: 0, duration: 0.25, ease: "power2.out" }, 18.4);
+      tl.from("#s4-r5", { x: -20, opacity: 0, duration: 0.35, ease: "power2.out" }, 18.6);
+      tl.from("#s4-trend", { y: 15, opacity: 0, duration: 0.4, ease: "power2.out" }, 19.0);
+      tl.to("#s4", { opacity: 0, duration: 0.3 }, 20.7);
+
+      /* ── Scene 5: Savings ── */
+      tl.from("#s5", { opacity: 0, duration: 0.3 }, 21.5);
+      tl.from("#s5-label", { y: 20, opacity: 0, duration: 0.5, ease: "power2.out" }, 21.8);
+      tl.from("#s5-amount", { scale: 0.7, opacity: 0, duration: 0.7, ease: "back.out(1.7)" }, 22.1);
+      tl.from("#s5-speed", { y: 15, opacity: 0, duration: 0.4, ease: "power2.out" }, 22.6);
+      tl.from("#s5-ram", { y: 15, opacity: 0, duration: 0.4, ease: "power2.out" }, 22.8);
+      tl.from("#s5-tokens", { y: 15, opacity: 0, duration: 0.4, ease: "power2.out" }, 23.0);
+
+      // Dollar amount count-up
+      tl.to("#s5-num", { duration: 1.0, ease: "power2.out",
+        onUpdate: function() {
+          const progress = this.progress();
+          const val = (5.15 * progress).toFixed(2);
+          document.getElementById("s5-num").textContent = val;
+        }
+      }, 22.2);
+
+      // Tokens count-up
+      tl.to("#s5-tokens", { duration: 0.8, ease: "power2.out",
+        onUpdate: function() {
+          document.getElementById("s5-tokens").textContent = Math.round(18.5 * this.progress()) + "k";
+        }
+      }, 22.6);
+
+      // Speed count-up
+      tl.to("#s5-speed", { duration: 0.6, ease: "power2.out",
+        onUpdate: function() {
+          document.getElementById("s5-speed").textContent = "+" + Math.round(34 * this.progress()) + "%";
+        }
+      }, 22.8);
+
+      // RAM count-up
+      tl.to("#s5-ram", { duration: 0.6, ease: "power2.out",
+        onUpdate: function() {
+          document.getElementById("s5-ram").textContent = Math.round(140 * this.progress());
+        }
+      }, 23.0);
+
+      tl.to("#s5", { opacity: 0, duration: 0.3 }, 25.2);
+
+      /* ── Scene 6: CTA ── */
+      tl.from("#s6", { opacity: 0, duration: 0.3 }, 25.5);
+      tl.from("#s6-title", { y: 20, opacity: 0, duration: 0.4, ease: "power2.out" }, 25.7);
+      tl.from("#s6-cmd", { scale: 0.9, opacity: 0, duration: 0.5, ease: "back.out(1.7)" }, 26.0);
+      tl.from("#s6-sub", { y: 15, opacity: 0, duration: 0.4, ease: "power2.out" }, 26.4);
+      tl.from("#s6-links", { y: 15, opacity: 0, duration: 0.4, ease: "power2.out" }, 26.7);
+      tl.from("#s6-logo", { y: 15, opacity: 0, duration: 0.4, ease: "power2.out" }, 27.0);
+
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>
