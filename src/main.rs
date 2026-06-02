@@ -1,3 +1,4 @@
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use std::io::Write;
 
@@ -13,8 +14,11 @@ mod sessions;
 mod types;
 
 use core::{detect_model, scan_hermes};
+use cost::{format_table, report as cost_report, GroupBy};
 use history::HistoryEntry;
 use macos::MacOSScanner;
+use pricing::Pricing;
+use sessions::Sessions;
 use types::*;
 
 fn main() {
@@ -43,6 +47,47 @@ fn main() {
         }
         Some(Commands::Clean { dry_run }) => {
             run_clean(*dry_run);
+        }
+        Some(Commands::Sessions) => {
+            run_sessions_list();
+        }
+        Some(Commands::Run { .. }) => {
+            // `agent0waste run -- <cmd> [args...]`
+            // We split argv ourselves so clap doesn't have to know about
+            // trailing args.
+            let argv: Vec<String> = std::env::args().collect();
+            match run::split_run_args(&argv) {
+                Ok((cmd, args)) => {
+                    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                    match run::run_and_record(&cmd, &arg_refs) {
+                        Ok(rec) => {
+                            eprintln!("[agent0waste] recorded session {}", rec.id);
+                            // Apply cost if pricing known — non-fatal.
+                            let pricing = Pricing::load();
+                            let sessions = Sessions::new();
+                            let list = sessions.list();
+                            if let Some(mut r) = list.into_iter().find(|r| r.id == rec.id) {
+                                sessions::Sessions::apply_cost(&mut r, &pricing);
+                            }
+                            std::process::exit(rec.exit_code);
+                        }
+                        Err(e) => {
+                            eprintln!("error: {}", e);
+                            std::process::exit(run::EXIT_BAD_ARGS);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    eprintln!();
+                    eprintln!("usage:  agent0waste run -- <cmd> [args...]");
+                    eprintln!("example:  agent0waste run -- hermes run foo");
+                    std::process::exit(run::EXIT_BAD_ARGS);
+                }
+            }
+        }
+        Some(Commands::Cost { by, since, export }) => {
+            run_cost(by.as_deref(), *since, export.as_deref());
         }
         None => {
             // Default: run a scan
@@ -87,6 +132,32 @@ enum Commands {
         /// Preview changes without deleting
         #[arg(long, default_value_t = true)]
         dry_run: bool,
+    },
+    /// List recorded sessions (Layer 2)
+    Sessions,
+    /// Run a command and record the session (Layer 2)
+    ///
+    /// Usage:  agent0waste run -- <cmd> [args...]
+    ///
+    /// Note: clap parses `run` as a flagless subcommand; the actual
+    /// command + args are read from std::env::args() past the `--`
+    /// separator (see run::split_run_args).
+    Run {
+        /// Catch-all for clap so trailing args aren't rejected.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        _args: Vec<String>,
+    },
+    /// Cost report from recorded sessions (Layer 2)
+    Cost {
+        /// Group by: total | model | provider | day
+        #[arg(long, default_value = "total")]
+        by: Option<String>,
+        /// Look back N days (default 7)
+        #[arg(long, default_value_t = 7)]
+        since: i64,
+        /// Export format: json (other values = human table)
+        #[arg(long)]
+        export: Option<String>,
     },
 }
 
@@ -302,4 +373,79 @@ fn print_efficiency_meter(
 
 fn run_clean(_dry_run: bool) {
     println!("Clean mode not yet implemented. Use `agent0waste scan` to audit.");
+}
+
+fn run_sessions_list() {
+    let s = Sessions::new();
+    let recs = s.list();
+    if recs.is_empty() {
+        println!("no sessions recorded yet");
+        println!("run:  agent0waste run -- <cmd>  to record one");
+        return;
+    }
+    println!("Agent0Waste — Recorded Sessions ({} of {})\n", recs.len(), Sessions::DEFAULT_CAP);
+    let id_w = recs.iter().map(|r| r.id.len()).max().unwrap_or(20).max(20);
+    println!(
+        "{:<id_w$}  {:<19}  {:>5}  {:>9}  {:<24}  {}",
+        "id", "started", "exit", "duration", "model", "command"
+    );
+    for r in &recs {
+        let model = r.model.clone().unwrap_or_else(|| "-".to_string());
+        let started = r.started_at.format("%Y-%m-%d %H:%M:%S").to_string();
+        let dur = format!("{}ms", r.duration_ms);
+        let cmd = if r.command.len() > 60 {
+            format!("{}…", &r.command[..59])
+        } else {
+            r.command.clone()
+        };
+        println!(
+            "{:<id_w$}  {:<19}  {:>5}  {:>9}  {:<24}  {}",
+            r.id, started, r.exit_code, dur, model, cmd,
+            id_w = id_w
+        );
+    }
+    let _ = id_w; // silence unused warning when we eventually parameterize
+}
+
+fn run_cost(by: Option<&str>, since_days: i64, export: Option<&str>) {
+    let pricing = Pricing::load();
+    let s = Sessions::new();
+    let recs = s.list();
+
+    let group_by = match by.unwrap_or("total") {
+        "model" => GroupBy::Model,
+        "provider" => GroupBy::Provider,
+        "day" => GroupBy::Day,
+        _ => GroupBy::Total,
+    };
+
+    // i64 days back from now; clamps to "always" when since_days <= 0.
+    let since = if since_days <= 0 {
+        chrono::DateTime::<Utc>::from_timestamp(0, 0).unwrap()
+    } else {
+        Utc::now() - chrono::Duration::days(since_days)
+    };
+
+    let rows = cost_report(&recs, &pricing, group_by, since);
+
+    if export == Some("json") {
+        let out = serde_json::json!({
+            "since": since.to_rfc3339(),
+            "group_by": by.unwrap_or("total"),
+            "rows": rows.iter().map(|r| serde_json::json!({
+                "key": r.key,
+                "cost_usd": r.cost_usd,
+                "sessions": r.sessions,
+                "input_tokens": r.input_tokens,
+                "output_tokens": r.output_tokens,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    } else {
+        println!("Agent0Waste — Cost Report");
+        println!("  group by : {}", by.unwrap_or("total"));
+        println!("  since    : last {} days (from {})", since_days, since.format("%Y-%m-%d"));
+        println!();
+        print!("{}", format_table(&rows));
+    }
 }
