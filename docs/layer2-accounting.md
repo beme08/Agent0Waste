@@ -2,44 +2,27 @@
 
 **Goal:** Measure token consumption across AI tools.
 
-Provides:
+The active design for this layer is in **[v0.2-design.md](./v0.2-design.md)** —
+confirmed decisions, schema, commands, and implementation order.
+
+This file is kept as a reference for the high-level intent and the original
+open questions that the v0.2 design resolved.
+
+## What this layer provides
+
 - Per-tool usage
 - Per-model usage
 - Session history
 - Estimated cost
 - Trends over time
 
-## Proposed Commands
+## Originally open questions (resolved in v0.2 design)
 
-```bash
-agent0waste track start
-agent0waste track stop
-agent0waste track status
-agent0waste history
-```
-
-### Alternative UX ideas (pending validation)
-```bash
-agent0waste track claude
-agent0waste track goose
-```
-
-> **Note:** These are speculative. Final command design will be validated by user feedback after v0.1.
-
-## Proposed Schema
-
-Minimal entities only:
-
-- **sessions** — individual tracked runs (start time, end time, tool, model)
-- **token_usage** — token counts per session (input, output, total)
-- **tools** — registry of known agent CLIs (Hermes, Claude Code, Goose, etc.)
-- **models** — model names + rough pricing metadata
-
-## Open Questions
-
-- Manual start/stop vs automatic wrapping?
-- How should local models (Ollama, MLX, etc.) be accounted for?
-- How often should pricing tables update?
-- SQLite only, or also exportable JSON/CSV?
-- What data can be collected without proxies or heavy instrumentation?
-- Should we track context compression / repeated prompt savings?
+| Original question | Resolved as |
+|---|---|
+| Manual start/stop vs automatic wrapping? | `run -- <cmd>` wrapper |
+| How should local models (Ollama, MLX) be accounted for? | Same parser; cost is $0 for local; record `is_local: true` |
+| How often should pricing tables update? | Built-in defaults, optional user override file, no auto-update |
+| SQLite only, or also exportable JSON/CSV? | JSON only for v0.2; sessions are JSON-per-file |
+| What data can be collected without proxies? | Wrapper captures stdout/stderr + wall time + tool logs |
+| Should we track context compression savings? | No — deferred to Layer 3 |
