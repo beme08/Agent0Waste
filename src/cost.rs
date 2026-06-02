@@ -128,6 +128,65 @@ pub fn report_hermes(
     out
 }
 
+/// List all distinct model names in the session set that have no
+/// pricing entry. Used by `cost --missing` to surface "you might want
+/// to add these to your pricing.toml".
+pub fn missing_models(sessions: &[HermesSession], pricing: &Pricing) -> Vec<MissingModel> {
+    use std::collections::HashMap;
+    let mut by_model: HashMap<String, MissingModel> = HashMap::new();
+    for s in sessions {
+        let short = s.model.rsplit('/').next().unwrap_or(&s.model).to_string();
+        let known = pricing.get(&s.model).is_some() || pricing.get(&short).is_some();
+        if known { continue; }
+        let entry = by_model.entry(s.model.clone()).or_insert(MissingModel {
+            name: s.model.clone(),
+            sessions: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            sources: std::collections::BTreeSet::new(),
+        });
+        entry.sessions += 1;
+        entry.input_tokens += s.input_tokens;
+        entry.output_tokens += s.output_tokens;
+        entry.cache_read_tokens += s.cache_read_tokens;
+        entry.sources.insert(s.source.clone());
+    }
+    let mut out: Vec<MissingModel> = by_model.into_values().collect();
+    out.sort_by(|a, b| b.input_tokens.cmp(&a.input_tokens));
+    out
+}
+
+#[derive(Debug, Clone)]
+pub struct MissingModel {
+    pub name: String,
+    pub sessions: usize,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub sources: std::collections::BTreeSet<String>,
+}
+
+impl MissingModel {
+    /// Render a TOML snippet the user can append to pricing.toml.
+    /// `input` and `output` default to 0.0 (free tier); user edits.
+    pub fn toml_snippet(&self) -> String {
+        // Quote the key if it contains a dot, colon, or slash (TOML
+        // dotted-key syntax + safer for non-bare chars).
+        let needs_quote = self.name.contains(|c: char| c == '.' || c == ':' || c == '/' || c.is_whitespace());
+        let key = if needs_quote {
+            format!("[\"{}\"]", self.name)
+        } else {
+            format!("[{}]", self.name)
+        };
+        let sources: Vec<&str> = self.sources.iter().map(|s| s.as_str()).collect();
+        format!(
+            "\n{}\ninput  = 0.00   # edit me: USD per 1M input tokens\noutput = 0.00   # edit me: USD per 1M output tokens  # used in: {}\n",
+            key, sources.join(", ")
+        )
+    }
+}
+
 // Local re-export to avoid a circular dep on sessions::Sessions.
 fn sessions_apply_cost(r: &mut SessionRecord, p: &Pricing) {
     crate::sessions::Sessions::apply_cost(r, p);
@@ -295,5 +354,36 @@ mod tests {
         let rows = report_hermes(&sessions, &pricing, GroupBy::Model);
         // 1M @ $5 = $5
         assert!((rows[0].cost_usd - 5.00).abs() < 1e-9);
+    }
+
+    #[test]
+    fn missing_models_lists_only_unpriced() {
+        let pricing = Pricing::default();  // has gpt-4o, grok-4, etc.
+        let sessions = vec![
+            hermes("a", "gpt-4o", "cli", 1000, 0, 0),          // known
+            hermes("b", "totally-custom-model", "cli", 5000, 0, 0), // missing
+            hermes("c", "totally-custom-model", "cron", 3000, 0, 0),// missing, same model
+        ];
+        let missing = missing_models(&sessions, &pricing);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].name, "totally-custom-model");
+        assert_eq!(missing[0].sessions, 2);
+        assert_eq!(missing[0].input_tokens, 8000);
+        assert!(missing[0].sources.contains("cli"));
+        assert!(missing[0].sources.contains("cron"));
+    }
+
+    #[test]
+    fn toml_snippet_quotes_dotted_keys() {
+        let m = MissingModel {
+            name: "openrouter/owl-alpha".into(),
+            sessions: 5, input_tokens: 100, output_tokens: 50,
+            cache_read_tokens: 0,
+            sources: ["cli".to_string()].into_iter().collect(),
+        };
+        let s = m.toml_snippet();
+        // Must be quoted because of the dot
+        assert!(s.contains("[\"openrouter/owl-alpha\"]"), "got: {}", s);
+        assert!(s.contains("used in: cli"));
     }
 }

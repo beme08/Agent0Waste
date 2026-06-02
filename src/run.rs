@@ -100,7 +100,14 @@ pub fn run_and_record(cmd: &str, args: &[&str]) -> Result<SessionRecord, String>
         host,
     };
 
-    Sessions::new().record(&rec)?;
+    let dropped = Sessions::new().record(&rec)?;
+    if dropped {
+        eprintln!(
+            "[agent0waste] warning: oldest sessions were dropped to stay under cap ({}). \
+             Set AGENT0WASTE_SESSIONS_CAP=<N> or 0 for no cap.",
+            Sessions::DEFAULT_CAP
+        );
+    }
     Ok(rec)
 }
 

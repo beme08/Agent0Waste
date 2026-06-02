@@ -1,6 +1,7 @@
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use std::io::Write;
+use std::path::PathBuf;
 
 mod core;
 mod cost;
@@ -16,7 +17,7 @@ mod sessions;
 mod types;
 
 use core::{detect_model, scan_hermes};
-use cost::{format_table, report as cost_report, report_hermes, GroupBy};
+use cost::{format_table, missing_models, report as cost_report, report_hermes, GroupBy};
 use heuristics::run_all as run_heuristics;
 use history::HistoryEntry;
 use macos::MacOSScanner;
@@ -89,8 +90,11 @@ fn main() {
                 }
             }
         }
-        Some(Commands::Cost { by, since, export, from_hermes, include_local, warnings }) => {
-            run_cost(by.as_deref(), *since, export.as_deref(), *from_hermes, *include_local, *warnings);
+        Some(Commands::Cost { by, since, export, from_hermes, include_local, warnings, missing }) => {
+            run_cost(by.as_deref(), *since, export.as_deref(), *from_hermes, *include_local, *warnings, *missing);
+        }
+        Some(Commands::Pricing { action }) => {
+            run_pricing(action);
         }
         None => {
             // Default: run a scan
@@ -136,6 +140,11 @@ enum Commands {
         #[arg(long, default_value_t = true)]
         dry_run: bool,
     },
+    /// Manage the pricing table (list / add / unset / path)
+    Pricing {
+        #[command(subcommand)]
+        action: PricingAction,
+    },
     /// List recorded sessions (Layer 2)
     Sessions,
     /// Run a command and record the session (Layer 2)
@@ -170,6 +179,9 @@ enum Commands {
         /// Layer 3: include heuristic warnings below the cost table.
         #[arg(long, default_value_t = false)]
         warnings: bool,
+        /// List models with no pricing entry (and a TOML snippet).
+        #[arg(long, default_value_t = false)]
+        missing: bool,
     },
 }
 
@@ -387,6 +399,166 @@ fn run_clean(_dry_run: bool) {
     println!("Clean mode not yet implemented. Use `agent0waste scan` to audit.");
 }
 
+// ---------------------------------------------------------------------------
+// Pricing management
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+enum PricingAction {
+    /// Show all known models and their rates.
+    List,
+    /// Print the path of the user's override file (and create it if missing).
+    Path,
+    /// Add or update a model rate in the user's override file.
+    ///
+    /// Example: agent0waste pricing add 'mimo-v2.5' 0.40 2.00
+    ///          agent0waste pricing add 'openrouter/owl-alpha' 0 0
+    Add {
+        /// Model name (quote it if it contains a dot or colon).
+        model: String,
+        /// USD per 1M input tokens.
+        input: f64,
+        /// USD per 1M output tokens.
+        output: f64,
+    },
+    /// Remove a model from the user's override file (keeps the default).
+    Unset {
+        /// Model name to remove from the override.
+        model: String,
+    },
+    /// Validate the override file: parses the TOML, catches negative
+    /// rates, and flags entries that shadow a default.
+    Check,
+}
+
+fn override_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/agent0waste/pricing.toml")
+}
+
+fn load_or_init_override() -> PathBuf {
+    let p = override_path();
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if !p.exists() {
+        let _ = std::fs::write(&p, "# Agent0Waste pricing override\n# Format: [model-name] with input/output in USD per 1M tokens.\n# Quote the model name if it contains a dot or colon.\n#\n# Examples:\n# [\"openrouter/owl-alpha\"]\n# input = 0.00\n# output = 0.00\n#\n# [\"grok-4.3\"]\n# input = 3.00\n# output = 15.00\n");
+    }
+    p
+}
+
+fn run_pricing(action: &PricingAction) {
+    match action {
+        PricingAction::List => {
+            let pricing = Pricing::load();
+            let mut names = pricing.known_models();
+            names.sort();
+            println!("Agent0Waste — Known Models ({} total)\n", names.len());
+            println!("{:<48}  {:>10}  {:>10}", "model", "$/1M in", "$/1M out");
+            println!("{}", "-".repeat(72));
+            for n in &names {
+                if let Some((i, o)) = pricing.get(n) {
+                    println!("{:<48}  ${:>9.4}  ${:>9.4}", n, i, o);
+                }
+            }
+        }
+        PricingAction::Path => {
+            let p = load_or_init_override();
+            println!("{}", p.display());
+        }
+        PricingAction::Add { model, input, output } => {
+            let p = load_or_init_override();
+            // Read existing file (or start empty)
+            let existing = std::fs::read_to_string(&p).unwrap_or_default();
+            // Render a fresh [model] block. We quote the key when it
+            // contains a dot, colon, or hyphen (TOML's bare-key rules
+            // are picky; quoting is always safe).
+            let needs_quote = model.contains(|c: char| c == '.' || c == ':' || c == '/' || c.is_whitespace());
+            let header = if needs_quote {
+                format!("[\"{}\"]", model)
+            } else {
+                format!("[{}]", model)
+            };
+            let block = format!("\n{}\ninput  = {:.4}\noutput = {:.4}\n", header, input, output);
+            // Append (TOML merge; the latest block wins on re-read).
+            let mut new_contents = existing.clone();
+            if !new_contents.ends_with('\n') && !new_contents.is_empty() {
+                new_contents.push('\n');
+            }
+            new_contents.push_str(&block);
+            std::fs::write(&p, new_contents).expect("write pricing.toml");
+            println!("added [{}] (${:.4} in / ${:.4} out) to {}", model, input, output, p.display());
+        }
+        PricingAction::Unset { model } => {
+            let p = override_path();
+            if !p.exists() {
+                println!("no override file at {} — nothing to unset", p.display());
+                return;
+            }
+            let contents = std::fs::read_to_string(&p).expect("read pricing.toml");
+            // Find the [model] or ["model"] block and remove everything
+            // until the next [section] header.
+            let header_bare = format!("[{}]", model);
+            let header_quoted = format!("[\"{}\"]", model);
+            let mut out = String::with_capacity(contents.len());
+            let mut skipping = false;
+            let mut removed_any = false;
+            for line in contents.lines() {
+                let trimmed = line.trim();
+                if trimmed == header_bare || trimmed == header_quoted {
+                    skipping = true;
+                    removed_any = true;
+                    continue;
+                }
+                if skipping && trimmed.starts_with('[') && !trimmed.is_empty() {
+                    skipping = false;
+                }
+                if !skipping {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+            if !removed_any {
+                println!("no override entry for [{}] in {}", model, p.display());
+                return;
+            }
+            std::fs::write(&p, out).expect("write pricing.toml");
+            println!("removed [{}] from {}", model, p.display());
+        }
+        PricingAction::Check => {
+            let c = pricing::PricingCheck::run();
+            match &c.path {
+                Some(p) => println!("override file: {}", p.display()),
+                None => println!("override file: (no home directory)"),
+            }
+            if !c.path.as_ref().map(|p| p.exists()).unwrap_or(false) {
+                println!("  (file does not exist — defaults are used as-is)");
+                println!("ok ({} default models)", c.models_count);
+                return;
+            }
+            println!("entries       : {}", c.models_count);
+            if c.errors.is_empty() {
+                println!("valid         : yes");
+            } else {
+                println!("valid         : no");
+                for e in &c.errors {
+                    println!("  - {}", e);
+                }
+            }
+            if !c.overlaps_with_default.is_empty() {
+                println!("\nshadows a default (overrides take precedence — verify you meant this):");
+                for (name, (in_r, out_r), (def_in, def_out)) in &c.overlaps_with_default {
+                    println!(
+                        "  {:<32}  override: ${:.4} in / ${:.4} out  |  default: ${:.4} in / ${:.4} out",
+                        name, in_r, out_r, def_in, def_out
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn run_sessions_list() {
     let s = Sessions::new();
     let recs = s.list();
@@ -426,6 +598,7 @@ fn run_cost(
     from_hermes: bool,
     include_local: bool,
     warnings: bool,
+    missing: bool,
 ) {
     let pricing = Pricing::load();
     let group_by = match by.unwrap_or("total") {
@@ -504,6 +677,14 @@ fn run_cost(
         heuristics::Report::new()
     };
 
+    // --missing: list unpriced models + a TOML snippet
+    let missing_models_list: Vec<cost::MissingModel> =
+        if missing && !raw_hermes.is_empty() {
+            missing_models(&raw_hermes, &pricing)
+        } else {
+            Vec::new()
+        };
+
     if export == Some("json") {
         let out = serde_json::json!({
             "since": since.to_rfc3339(),
@@ -519,6 +700,17 @@ fn run_cost(
                 "cache_read_tokens": r.cache_read_tokens,
             })).collect::<Vec<_>>(),
             "warnings": if warnings { heur_report.to_json() } else { Vec::<serde_json::Value>::new() },
+            "missing_models": if missing {
+                missing_models_list.iter().map(|m| serde_json::json!({
+                    "name": m.name,
+                    "sessions": m.sessions,
+                    "input_tokens": m.input_tokens,
+                    "output_tokens": m.output_tokens,
+                    "cache_read_tokens": m.cache_read_tokens,
+                    "sources": m.sources.iter().collect::<Vec<_>>(),
+                    "toml_snippet": m.toml_snippet().trim(),
+                })).collect::<Vec<_>>()
+            } else { Vec::<serde_json::Value>::new() },
         });
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
     } else {
@@ -537,6 +729,26 @@ fn run_cost(
             println!();
             println!("Heuristic warnings (Layer 3):");
             print!("{}", heur_report.format());
+        }
+        if missing {
+            println!();
+            println!("Models with no pricing ({}):", missing_models_list.len());
+            if missing_models_list.is_empty() {
+                println!("  (all models in the window are priced — nice)");
+            } else {
+                for m in &missing_models_list {
+                    println!(
+                        "  {:<48}  {} sessions  {} in / {} out  sources: {}",
+                        m.name, m.sessions, m.input_tokens, m.output_tokens,
+                        m.sources.iter().cloned().collect::<Vec<_>>().join(",")
+                    );
+                }
+                println!();
+                println!("Append to your pricing.toml ({}):", override_path().display());
+                for m in &missing_models_list {
+                    print!("{}", m.toml_snippet());
+                }
+            }
         }
     }
 }

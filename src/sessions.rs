@@ -76,17 +76,23 @@ pub struct Sessions {
 }
 
 impl Sessions {
-    pub const DEFAULT_CAP: usize = 500;
+    pub const DEFAULT_CAP: usize = 2000;
 
     /// New storage at `~/.local/share/agent0waste/sessions/`. Creates
-    /// the directory if missing. Cap defaults to 500.
+    /// the directory if missing. Cap defaults to 2000 (was 500 in
+    /// v0.2.0-beta; bumped because real users hit ~334 sessions/day).
+    /// Honors `AGENT0WASTE_SESSIONS_CAP` env var if set (0 = no cap).
     pub fn new() -> Self {
         let base = dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("agent0waste")
             .join("sessions");
         let _ = std::fs::create_dir_all(&base);
-        Self { base, cap: Self::DEFAULT_CAP }
+        let cap = std::env::var("AGENT0WASTE_SESSIONS_CAP")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(Self::DEFAULT_CAP);
+        Self { base, cap }
     }
 
     /// New storage at a custom path. Used by tests.
@@ -95,19 +101,27 @@ impl Sessions {
         Self { base, cap: Self::DEFAULT_CAP }
     }
 
+    /// New storage at a custom path with a custom cap. Use this when
+    /// the user passes --cap N or --no-cap.
+    pub fn at_with_cap(base: PathBuf, cap: usize) -> Self {
+        let _ = std::fs::create_dir_all(&base);
+        Self { base, cap }
+    }
+
     pub fn base(&self) -> &Path { &self.base }
+    pub fn cap(&self) -> usize { self.cap }
 
     /// Persist a record. Atomic write via temp file + rename. After
     /// writing, enforces the FIFO cap by deleting the oldest files.
-    pub fn record(&self, rec: &SessionRecord) -> Result<(), String> {
+    /// Returns `true` if any files were dropped to stay under the cap.
+    pub fn record(&self, rec: &SessionRecord) -> Result<bool, String> {
         let path = self.base.join(format!("{}.json", rec.id));
         let tmp = self.base.join(format!(".{}.tmp", rec.id));
         let json = serde_json::to_string_pretty(rec)
             .map_err(|e| format!("serialize: {}", e))?;
         std::fs::write(&tmp, &json).map_err(|e| format!("write: {}", e))?;
         std::fs::rename(&tmp, &path).map_err(|e| format!("rename: {}", e))?;
-        self.enforce_cap();
-        Ok(())
+        Ok(self.enforce_cap())
     }
 
     /// Load all records, sorted by `started_at` descending. Missing
@@ -136,7 +150,10 @@ impl Sessions {
         }
     }
 
-    fn enforce_cap(&self) {
+    /// Returns the number of files deleted to stay under the cap.
+    /// Public for the `sessions` subcommand to report drops.
+    pub fn enforce_cap(&self) -> bool {
+        if self.cap == 0 { return false; } // 0 = "no cap"; do not drop
         let mut paths: Vec<_> = match std::fs::read_dir(&self.base) {
             Ok(rd) => rd.filter_map(|e| e.ok())
                 .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
@@ -146,15 +163,15 @@ impl Sessions {
                     Some((e.path(), modified))
                 })
                 .collect(),
-            Err(_) => return,
+            Err(_) => return false,
         };
-        if paths.len() <= self.cap { return; }
-        // Oldest first.
+        if paths.len() <= self.cap { return false; }
         paths.sort_by_key(|(_, t)| *t);
         let to_delete = paths.len() - self.cap;
         for (path, _) in paths.iter().take(to_delete) {
             let _ = std::fs::remove_file(path);
         }
+        true
     }
 }
 

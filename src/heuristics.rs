@@ -91,8 +91,10 @@ impl Report {
 // we're paying 100% of input cost for what was already in the cache — i.e.
 // the user's context is full of repeated content that should be trimmed.
 //
-// Threshold: cache_read / input >= 3.0 (with a floor of 1000 cache_read
-// tokens to avoid noise from tiny sessions).
+// Thresholds:
+//   - per-session: cache_read / input >= 3.0 AND cache_read >= 1000
+//   - per-group:   at least 3 sessions before we surface a finding
+//     (a 1-session finding is almost always noise — a single test).
 pub fn h1_cache_bloat(sessions: &[HermesSession]) -> Vec<Finding> {
     let mut out = Vec::new();
     // Aggregate per (model, source) so we don't 1000-line the report.
@@ -109,6 +111,7 @@ pub fn h1_cache_bloat(sessions: &[HermesSession]) -> Vec<Finding> {
         e.2 += 1;
     }
     for ((model, source), (in_t, cache_t, n)) in by_group {
+        if n < 3 { continue; } // skip noise: <3 sessions
         let ratio = cache_t as f64 / in_t as f64;
         out.push(Finding {
             id: "cache_bloat",
@@ -129,8 +132,10 @@ pub fn h1_cache_bloat(sessions: &[HermesSession]) -> Vec<Finding> {
 // --------------------------------------------------------------------------
 //
 // For each (model, source) pair, group input_tokens by day. If the most
-// recent 3 days are > 1.3x the prior 3 days, that's growing. Catches the
+// recent 3 days are > 1.5x the prior 3 days, that's growing. Catches the
 // "I haven't added a tool, why are prompts 2x larger?" case.
+//
+// Threshold: at least 3 days in each window (so we have signal).
 pub fn h2_prompt_growth(sessions: &[HermesSession], since: DateTime<Utc>) -> Vec<Finding> {
     let mut out = Vec::new();
     // Per (model, source, day) sum of input_tokens.
@@ -147,7 +152,7 @@ pub fn h2_prompt_growth(sessions: &[HermesSession], since: DateTime<Utc>) -> Vec
     }
     for ((model, source), mut days) in by_group {
         days.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
-        if days.len() < 4 { continue; }
+        if days.len() < 6 { continue; } // need 3 + 3 distinct days
         let recent: u64 = days.iter().take(3).map(|(_, t)| *t).sum::<u64>().max(1);
         let prior: u64 = days.iter().skip(3).take(3).map(|(_, t)| *t).sum::<u64>().max(1);
         let growth = recent as f64 / prior as f64;
@@ -173,7 +178,10 @@ pub fn h2_prompt_growth(sessions: &[HermesSession], since: DateTime<Utc>) -> Vec
 //
 // Sessions where the model is literally "auto" — Hermes is choosing
 // for you. That's fine for some, but it's the #1 reason cost varies
-// unpredictably between days. Flag it.
+// unpredictably between days. Flag it (info-level).
+//
+// Threshold: at least 5 sessions. Below that, 'auto' use is intentional
+// exploration, not a pattern.
 pub fn h3_auto_routing(sessions: &[HermesSession]) -> Vec<Finding> {
     let mut n = 0usize;
     let mut in_t = 0u64;
@@ -183,7 +191,7 @@ pub fn h3_auto_routing(sessions: &[HermesSession]) -> Vec<Finding> {
             in_t += s.input_tokens;
         }
     }
-    if n == 0 { return Vec::new(); }
+    if n < 5 { return Vec::new(); }
     vec![Finding {
         id: "auto_routing",
         severity: Severity::Info,
@@ -202,7 +210,7 @@ pub fn h3_auto_routing(sessions: &[HermesSession]) -> Vec<Finding> {
 //
 // Same source, but the model changed across the window. Suggests the user
 // is experimenting, or the system is auto-rotating, or something else.
-// Flag if any source uses 2+ different models.
+// Flag if any source uses 3+ different models (2 is a normal A/B).
 pub fn h4_model_instability(sessions: &[HermesSession], since: DateTime<Utc>) -> Vec<Finding> {
     let mut by_source: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     for s in sessions {
@@ -211,7 +219,7 @@ pub fn h4_model_instability(sessions: &[HermesSession], since: DateTime<Utc>) ->
     }
     let mut out = Vec::new();
     for (source, models) in by_source {
-        if models.len() < 2 { continue; }
+        if models.len() < 3 { continue; }
         let mut sorted: Vec<String> = models.into_iter().collect();
         sorted.sort();
         out.push(Finding {
@@ -258,12 +266,25 @@ mod tests {
 
     #[test]
     fn h1_flags_cache_bloat() {
+        // Need 3+ sessions in the same (model, source) group.
         let s = vec![
-            hs("grok-4.3", "cli", "2026-06-02T10:00:00Z", 1_000, 100, 5_000), // 5x
+            hs("grok-4.3", "cli", "2026-06-02T10:00:00Z", 1_000, 100, 5_000),
+            hs("grok-4.3", "cli", "2026-06-02T11:00:00Z", 1_000, 100, 5_000),
+            hs("grok-4.3", "cli", "2026-06-02T12:00:00Z", 1_000, 100, 5_000),
         ];
         let f = h1_cache_bloat(&s);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].id, "cache_bloat");
+    }
+
+    #[test]
+    fn h1_skips_small_groups() {
+        // 2 sessions — below the 3-session threshold, should not flag.
+        let s = vec![
+            hs("grok-4.3", "cli", "2026-06-02T10:00:00Z", 1_000, 100, 5_000),
+            hs("grok-4.3", "cli", "2026-06-02T11:00:00Z", 1_000, 100, 5_000),
+        ];
+        assert!(h1_cache_bloat(&s).is_empty());
     }
 
     #[test]
@@ -276,15 +297,16 @@ mod tests {
 
     #[test]
     fn h2_flags_growth() {
+        // Need 6+ distinct days (3 + 3) to fire.
         let s = vec![
-            hs("gpt-4o", "cli", "2026-05-25T10:00:00Z", 1_000, 0, 0),
-            hs("gpt-4o", "cli", "2026-05-26T10:00:00Z", 1_000, 0, 0),
-            hs("gpt-4o", "cli", "2026-05-27T10:00:00Z", 1_000, 0, 0),
-            hs("gpt-4o", "cli", "2026-05-28T10:00:00Z", 2_500, 0, 0), // 2.5x
-            hs("gpt-4o", "cli", "2026-05-29T10:00:00Z", 2_500, 0, 0),
-            hs("gpt-4o", "cli", "2026-05-30T10:00:00Z", 2_500, 0, 0),
+            hs("gpt-4o", "cli", "2026-05-20T10:00:00Z", 1_000, 0, 0),
+            hs("gpt-4o", "cli", "2026-05-21T10:00:00Z", 1_000, 0, 0),
+            hs("gpt-4o", "cli", "2026-05-22T10:00:00Z", 1_000, 0, 0),
+            hs("gpt-4o", "cli", "2026-05-25T10:00:00Z", 2_500, 0, 0),
+            hs("gpt-4o", "cli", "2026-05-26T10:00:00Z", 2_500, 0, 0),
+            hs("gpt-4o", "cli", "2026-05-27T10:00:00Z", 2_500, 0, 0),
         ];
-        let since = DateTime::parse_from_rfc3339("2026-05-25T00:00:00Z").unwrap().with_timezone(&Utc);
+        let since = DateTime::parse_from_rfc3339("2026-05-20T00:00:00Z").unwrap().with_timezone(&Utc);
         let f = h2_prompt_growth(&s, since);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].id, "prompt_growth");
@@ -292,13 +314,28 @@ mod tests {
 
     #[test]
     fn h3_flags_auto_routing() {
+        // Need 5+ sessions to fire.
         let s = vec![
             hs("auto", "cli", "2026-06-02T10:00:00Z", 1_000, 100, 0),
             hs("auto", "cli", "2026-06-02T11:00:00Z", 1_000, 100, 0),
+            hs("auto", "cli", "2026-06-02T12:00:00Z", 1_000, 100, 0),
+            hs("auto", "cli", "2026-06-02T13:00:00Z", 1_000, 100, 0),
+            hs("auto", "cli", "2026-06-02T14:00:00Z", 1_000, 100, 0),
         ];
         let f = h3_auto_routing(&s);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].id, "auto_routing");
+    }
+
+    #[test]
+    fn h3_ignores_few_auto_sessions() {
+        // Only 3 auto sessions — under threshold, not flagged.
+        let s = vec![
+            hs("auto", "cli", "2026-06-02T10:00:00Z", 1_000, 100, 0),
+            hs("auto", "cli", "2026-06-02T11:00:00Z", 1_000, 100, 0),
+            hs("auto", "cli", "2026-06-02T12:00:00Z", 1_000, 100, 0),
+        ];
+        assert!(h3_auto_routing(&s).is_empty());
     }
 
     #[test]
@@ -309,10 +346,11 @@ mod tests {
 
     #[test]
     fn h4_flags_model_instability() {
-        // Same source "cli", but model differs across days.
+        // Same source "cli", but 3+ different models in the window.
         let s = vec![
             hs("gpt-4o", "cli", "2026-06-01T10:00:00Z", 100, 0, 0),
             hs("grok-4.3", "cli", "2026-06-02T10:00:00Z", 100, 0, 0),
+            hs("claude-3.7-sonnet", "cli", "2026-06-03T10:00:00Z", 100, 0, 0),
         ];
         let since = DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z").unwrap().with_timezone(&Utc);
         let f = h4_model_instability(&s, since);
