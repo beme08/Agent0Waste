@@ -8,6 +8,7 @@ mod macos;
 mod permission;
 mod pricing;
 mod report;
+mod run;
 mod sessions;
 mod types;
 
