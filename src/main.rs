@@ -4,6 +4,7 @@ use std::io::Write;
 
 mod core;
 mod cost;
+mod heuristics;
 mod hermes_state;
 mod history;
 mod macos;
@@ -16,6 +17,7 @@ mod types;
 
 use core::{detect_model, scan_hermes};
 use cost::{format_table, report as cost_report, report_hermes, GroupBy};
+use heuristics::run_all as run_heuristics;
 use history::HistoryEntry;
 use macos::MacOSScanner;
 use pricing::Pricing;
@@ -87,8 +89,8 @@ fn main() {
                 }
             }
         }
-        Some(Commands::Cost { by, since, export, from_hermes, include_local }) => {
-            run_cost(by.as_deref(), *since, export.as_deref(), *from_hermes, *include_local);
+        Some(Commands::Cost { by, since, export, from_hermes, include_local, warnings }) => {
+            run_cost(by.as_deref(), *since, export.as_deref(), *from_hermes, *include_local, *warnings);
         }
         None => {
             // Default: run a scan
@@ -165,6 +167,9 @@ enum Commands {
         /// Also read from local session records. Default: off.
         #[arg(long, default_value_t = false)]
         include_local: bool,
+        /// Layer 3: include heuristic warnings below the cost table.
+        #[arg(long, default_value_t = false)]
+        warnings: bool,
     },
 }
 
@@ -420,6 +425,7 @@ fn run_cost(
     export: Option<&str>,
     from_hermes: bool,
     include_local: bool,
+    warnings: bool,
 ) {
     let pricing = Pricing::load();
     let group_by = match by.unwrap_or("total") {
@@ -436,16 +442,16 @@ fn run_cost(
         Utc::now() - chrono::Duration::days(since_days)
     };
 
-    // Source 1: Hermes state.db
-    let mut rows: Vec<cost::CostRow> = if from_hermes {
+    // We need raw HermesSession list to run heuristics; load it once
+    // even if --from-hermes is off (heuristics only work on Hermes data).
+    let raw_hermes: Vec<hermes_state::HermesSession> = if from_hermes {
         match hermes_state::default_state_path() {
             Some(p) => match hermes_state::read_recent(since, &p) {
-                Ok(hermes_sessions) => {
-                    let r = report_hermes(&hermes_sessions, &pricing, group_by);
+                Ok(v) => {
                     if export != Some("json") {
-                        eprintln!("[agent0waste] read {} sessions from {}", hermes_sessions.len(), p.display());
+                        eprintln!("[agent0waste] read {} sessions from {}", v.len(), p.display());
                     }
-                    r
+                    v
                 }
                 Err(e) => {
                     eprintln!("[agent0waste] warning: could not read {}: {}", p.display(), e);
@@ -454,6 +460,13 @@ fn run_cost(
             },
             None => Vec::new(),
         }
+    } else {
+        Vec::new()
+    };
+
+    // Source 1: Hermes state.db
+    let mut rows: Vec<cost::CostRow> = if from_hermes {
+        report_hermes(&raw_hermes, &pricing, group_by)
     } else {
         Vec::new()
     };
@@ -484,6 +497,13 @@ fn run_cost(
         rows.sort_by(|a, b| b.cost_usd.partial_cmp(&a.cost_usd).unwrap_or(std::cmp::Ordering::Equal));
     }
 
+    // Layer 3: heuristics
+    let heur_report = if warnings && !raw_hermes.is_empty() {
+        run_heuristics(&raw_hermes, since)
+    } else {
+        heuristics::Report::new()
+    };
+
     if export == Some("json") {
         let out = serde_json::json!({
             "since": since.to_rfc3339(),
@@ -498,6 +518,7 @@ fn run_cost(
                 "output_tokens": r.output_tokens,
                 "cache_read_tokens": r.cache_read_tokens,
             })).collect::<Vec<_>>(),
+            "warnings": if warnings { heur_report.to_json() } else { Vec::<serde_json::Value>::new() },
         });
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
     } else {
@@ -512,5 +533,10 @@ fn run_cost(
         });
         println!();
         print!("{}", format_table(&rows));
+        if warnings {
+            println!();
+            println!("Heuristic warnings (Layer 3):");
+            print!("{}", heur_report.format());
+        }
     }
 }
