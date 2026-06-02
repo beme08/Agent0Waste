@@ -6,6 +6,7 @@ mod cost;
 mod history;
 mod macos;
 mod permission;
+mod pricing;
 mod report;
 mod types;
 
