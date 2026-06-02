@@ -8,6 +8,7 @@ mod cost;
 mod heuristics;
 mod hermes_state;
 mod history;
+mod intercept;
 mod macos;
 mod permission;
 mod pricing;
@@ -20,6 +21,7 @@ use core::{detect_model, scan_hermes};
 use cost::{format_table, missing_models, report as cost_report, report_hermes, GroupBy};
 use heuristics::run_all as run_heuristics;
 use history::HistoryEntry;
+use intercept::{check as intercept_check, intercept_toml_path, Action, CheckHint, Decision, InterceptConfig, Mode};
 use macos::MacOSScanner;
 use pricing::Pricing;
 use sessions::Sessions;
@@ -96,6 +98,9 @@ fn main() {
         Some(Commands::Pricing { action }) => {
             run_pricing(action);
         }
+        Some(Commands::Intercept { action }) => {
+            run_intercept(action);
+        }
         None => {
             // Default: run a scan
             let scanner = MacOSScanner::new();
@@ -144,6 +149,11 @@ enum Commands {
     Pricing {
         #[command(subcommand)]
         action: PricingAction,
+    },
+    /// Layer 4: intercept calls based on heuristic rules
+    Intercept {
+        #[command(subcommand)]
+        action: InterceptAction,
     },
     /// List recorded sessions (Layer 2)
     Sessions,
@@ -431,6 +441,48 @@ enum PricingAction {
     Check,
 }
 
+// ---------------------------------------------------------------------------
+// Interception (Layer 4)
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+enum InterceptAction {
+    /// Run heuristics against the current state and emit a JSON decision.
+    ///
+    /// Exit code: 0 = allow, 64 = throttle, 65 = prompt. The wrapper
+    /// (wrap.sh, installed by `intercept enable`) uses these codes to
+    /// decide whether to run, sleep, or ask.
+    Check {
+        /// Model hint (used in the decision message only; doesn't change action).
+        #[arg(long)]
+        model: Option<String>,
+        /// Estimated input tokens (used in the decision message only).
+        #[arg(long)]
+        tokens: Option<u64>,
+        /// The command being wrapped (used in the decision message only).
+        #[arg(long)]
+        command: Option<String>,
+        /// Source of the call: cli | cron. Default: cli.
+        #[arg(long, default_value = "cli")]
+        source: String,
+        /// Look back N days (default 7). 0 = "always".
+        #[arg(long, default_value_t = 7)]
+        since: i64,
+    },
+    /// Show the current interception state (stub for v0.4.0).
+    Status,
+    /// Install the wrapper and shell alias (stub for v0.4.0).
+    Enable {
+        /// Use fail-closed mode instead of fail-open (v0.4.1+).
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Remove the wrapper and shell alias (stub for v0.4.0).
+    Disable,
+    /// Show the rule table that `check` consults.
+    Rules,
+}
+
 fn override_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -557,6 +609,131 @@ fn run_pricing(action: &PricingAction) {
             }
         }
     }
+}
+
+fn run_intercept(action: &InterceptAction) {
+    match action {
+        InterceptAction::Check { model, tokens, command, source, since } => {
+            run_intercept_check(model.as_deref(), *tokens, command.as_deref(), source, *since);
+        }
+        InterceptAction::Status => {
+            run_intercept_status();
+        }
+        InterceptAction::Enable { strict: _ } => {
+            eprintln!("[agent0waste] intercept enable is not implemented in this build");
+            eprintln!("see docs/v0.4-design.md for the planned implementation");
+            std::process::exit(70);
+        }
+        InterceptAction::Disable => {
+            eprintln!("[agent0waste] intercept disable is not implemented in this build");
+            std::process::exit(70);
+        }
+        InterceptAction::Rules => {
+            run_intercept_rules();
+        }
+    }
+}
+
+fn run_intercept_check(
+    model: Option<&str>,
+    tokens: Option<u64>,
+    command: Option<&str>,
+    source: &str,
+    since_days: i64,
+) {
+    // We need the same Hermes data `cost --from-hermes` reads. If the
+    // state.db is unreadable, fail-open: emit `allow`.
+    let since = if since_days <= 0 {
+        chrono::DateTime::<Utc>::from_timestamp(0, 0).unwrap()
+    } else {
+        Utc::now() - chrono::Duration::days(since_days)
+    };
+
+    let sessions: Vec<hermes_state::HermesSession> = match hermes_state::default_state_path() {
+        Some(p) => match hermes_state::read_recent(since, &p) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[agent0waste] warning: could not read {}: {}", p.display(), e);
+                eprintln!("[agent0waste] fail-open: allowing call");
+                let allow = Decision::Allow;
+                println!("{}", allow.to_json());
+                std::process::exit(allow.exit_code());
+            }
+        },
+        None => {
+            eprintln!("[agent0waste] warning: no home directory; cannot read state.db");
+            eprintln!("[agent0waste] fail-open: allowing call");
+            let allow = Decision::Allow;
+            println!("{}", allow.to_json());
+            std::process::exit(allow.exit_code());
+        }
+    };
+
+    let cfg = InterceptConfig::load();
+    let hint = CheckHint {
+        model: model.map(|s| s.to_string()),
+        tokens,
+        command: command.map(|s| s.to_string()),
+        source: Some(source.to_string()),
+    };
+
+    let decision = intercept_check(&sessions, since, &cfg, &hint);
+    println!("{}", decision.to_json());
+    std::process::exit(decision.exit_code());
+}
+
+fn run_intercept_status() {
+    let cfg = InterceptConfig::load();
+    let p = intercept_toml_path();
+    match p {
+        Some(path) => {
+            if path.exists() {
+                println!("intercept: enabled (config: {})", path.display());
+            } else {
+                println!("intercept: not enabled (no config at {})", path.display());
+            }
+        }
+        None => {
+            println!("intercept: not enabled (no home directory)");
+        }
+    }
+    println!("mode: {}", match cfg.mode {
+        Mode::FailOpen => "fail-open",
+        Mode::FailClosed => "fail-closed",
+    });
+    println!("rules: {}", cfg.rules.len());
+    for (id, rule) in &cfg.rules {
+        let action = match rule.action {
+            Action::Allow => "allow",
+            Action::Throttle => "throttle",
+            Action::Prompt => "prompt",
+        };
+        println!("  {:<20}  action={:<8}  cooldown_s={}", id, action, rule.cooldown_s);
+    }
+}
+
+fn run_intercept_rules() {
+    println!("default rule table (severity → action):");
+    println!();
+    println!("  {:<18}  {:<8}  {:<8}  {:<10}", "heuristic", "high", "medium", "info");
+    println!("  {}", "-".repeat(50));
+    for id in ["cache_bloat", "prompt_growth", "auto_routing", "model_instability"] {
+        // Show the default action for each severity tier
+        let high = match id {
+            "cache_bloat" => "throttle",
+            "prompt_growth" => "prompt",
+            _ => "allow",
+        };
+        let med = match id {
+            "cache_bloat" => "prompt",
+            "prompt_growth" => "throttle",
+            _ => "allow",
+        };
+        let info = "allow";
+        println!("  {:<18}  {:<8}  {:<8}  {:<10}", id, high, med, info);
+    }
+    println!();
+    println!("override in ~/.config/agent0waste/intercept.toml");
 }
 
 fn run_sessions_list() {
