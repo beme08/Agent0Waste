@@ -8,6 +8,7 @@ mod macos;
 mod permission;
 mod pricing;
 mod report;
+mod sessions;
 mod types;
 
 use core::{detect_model, scan_hermes};
