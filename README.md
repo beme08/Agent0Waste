@@ -104,8 +104,6 @@ See [docs/roadmap.md](docs/roadmap.md) for details.
 
 Privacy-first. Local-only. No telemetry. No accounts.
 
-If it can't run completely offline with zero data leaving your machine, it doesn't belong here.
-
 ## License
 
 MIT
