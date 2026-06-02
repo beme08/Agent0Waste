@@ -6,6 +6,14 @@ Shows exactly what is wasting RAM, disk space, and tokens on your machine -- wit
 
 > v0.1.0-alpha -- macOS only
 
+<p align="center">
+  <img src="agent0waste-demo/renders/agent0waste-demo.gif" alt="Agent0Waste demo -- real scan of local Hermes profiles (505 KB, 30s)" width="720" />
+</p>
+
+<p align="center">
+  <em>Real scan output from <code>agent0waste scan</code> on the developer's machine. <a href="agent0waste-demo/renders/agent0waste-demo.mp4">Watch the 1920x1080 MP4</a> for full quality.</em>
+</p>
+
 ## What it does
 
 Agent0Waste scans your local AI agent setup and finds waste:
