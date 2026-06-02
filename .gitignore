@@ -3,3 +3,5 @@
 Cargo.lock
 .DS_Store
 .config/
+agent0waste-demo/renders/*_*.mp4
+agent0waste-demo/renders/*.DS_Store

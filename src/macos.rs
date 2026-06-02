@@ -37,24 +37,9 @@ impl MacOSScanner {
             .unwrap_or(0)
     }
 
-    pub fn count_expensive_tools(&self) -> u32 {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let path = format!("{}/.hermes/config.yaml", home);
 
-        if let Ok(content) = fs::read_to_string(path) {
-            let expensive = [
-                "web",
-                "browser",
-                "vision",
-                "image_gen",
-                "tts",
-                "computer_use",
-                "x_search",
-            ];
-            return expensive.iter().filter(|t| content.contains(*t)).count() as u32;
-        }
-        0
-    }
+
+
 
     pub fn count_kanban_boards(&self) -> u32 {
         let home = std::env::var("HOME").unwrap_or_default();

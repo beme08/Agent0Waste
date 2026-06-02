@@ -164,9 +164,9 @@
     <div class="scene" id="s1">
       <div class="logo">agent0<span>w</span>aste</div>
       <div class="tagline">Local-first waste scanner for AI agent CLIs</div>
-      <div class="badge">Example output · anonymized data</div>
+      <div class="badge">Real scan output · v0.1.0-alpha</div>
       <div class="disclaimer">
-        Example output — anonymized data · no telemetry · runs entirely on your machine
+        Real scan output — captured from local test machine · no telemetry · runs entirely on your machine
       </div>
     </div>
 
@@ -178,29 +178,28 @@
         <div class="terminal-bar">
           <div class="dot dot-r"></div><div class="dot dot-y"></div><div class="dot dot-g"></div>
         </div>
-        <div class="term-body"><span class="kw">Model</span>     : remote-model (<span class="st">cloud-provider</span>) [<span class="st">remote</span>]
+        <div class="term-body"><span class="kw">Model</span>     : grok-4.3 (xai-oauth)  [<span class="wa">remote</span>]
+
 <span class="kw">Hermes profiles</span> (<span class="st">8</span>):
-  alpha-core           <span class="st">tools: 13</span>  (<span class="wa">2 expensive</span>)
-  worker-a             <span class="st">tools:  0</span>  (clean)
-  worker-b             <span class="st">tools:  0</span>  (clean)
-  ops-agent            <span class="st">tools:  0</span>  (clean)
-  dev-tools            <span class="st">tools:  0</span>  (clean)
-  swarm-a              <span class="st">tools:  0</span>  (clean)
-  swarm-b              <span class="st">tools:  0</span>  (clean)
-  research             <span class="st">tools:  0</span>  (clean)
+  hermes-cto           <span class="st">tools:  0</span>  (clean)
+  hermes-sec           <span class="st">tools:  0</span>  (clean)
+  hermes-pm            <span class="st">tools:  0</span>  (clean)
+  designer             <span class="st">tools:  0</span>  (clean)
+  shkumbins_dev        <span class="st">tools:  0</span>  (clean)
+  hermes-core          <span class="st">tools: 13</span>  (<span class="wa">3 expensive</span>)
+  hermes-dev           <span class="st">tools:  0</span>  (clean)
+  researcher           <span class="st">tools:  0</span>  (clean)
 
 <span class="kw">Waste detected:</span>
-[<span class="mi">MEDIUM</span>] tool_bloat — Profile 'alpha-core' has 2 expensive tools enabled (web/browser)
-    → ~8-15k tokens/month
-[<span class="ok">LOW</span>] config_bloat — Profile 'alpha-core' has 13 tools enabled (consider minimal set)
-    → reduced context + faster startup
+  [<span class="wa">high</span>] tool_bloat — 3 expensive tools enabled by default in hermes-core (web, browser, computer_use)
+       → ~20-40k tokens/mo + lower RAM
 
-Efficiency: 70% [██████████████░░░░░░]
+Efficiency: 85% [█████████████████░░░]
 If cleaned: 98% [███████████████████░]
-  → -18k tokens/mo | +28% speed
-Machine: M-series Mac · macOS</div>
+  → -18k tokens/mo | +13% speed
+Machine: macOS • Mac16,7</div>
       </div>
-      <div class="disclaimer">Example output — observed on local test machine · anonymized names</div>
+      <div class="disclaimer">Real scan output — verbatim from `agent0waste scan` on local test machine</div>
     </div>
 
     <!-- ══════════ SCENE 3: Report (Waste) ══════════ -->
@@ -209,51 +208,43 @@ Machine: M-series Mac · macOS</div>
       <div id="s3-title" class="panel-title">Waste detected</div>
       <div class="waste-cards">
         <div id="s3-card1" class="waste-card">
-          <span class="sev sev-medium">MEDIUM</span>
+          <span class="sev sev-high">HIGH</span>
           <div>
             <div class="cat">tool_bloat</div>
-            <div class="desc">Profile 'alpha-core' has 2 expensive tools enabled (web/browser)</div>
-            <div class="est">→ ~8–15k tokens/month savings possible</div>
+            <div class="desc">3 expensive tools enabled by default in hermes-core (web, browser, computer_use)</div>
+            <div class="est">→ ~20–40k tokens/month savings possible</div>
           </div>
         </div>
-        <div id="s3-card2" class="waste-card">
-          <span class="sev sev-low">LOW</span>
-          <div>
-            <div class="cat">config_bloat</div>
-            <div class="desc">Profile 'alpha-core' has 13 tools enabled (consider minimal set)</div>
-            <div class="est">→ reduced context + faster startup</div>
-          </div>
-        </div>
-
       </div>
       <div class="disclaimer">
-        Examples match real scanner output format · savings are estimates
+        Real scan output · savings are estimates · heuristic detection in v0.1
       </div>
     </div>
 
     <!-- ══════════ SCENE 4: History ══════════ -->
     <div class="scene" id="s4">
       <div id="s4-step" class="step-label">STEP 03 / HISTORY</div>
-      <div id="s4-title" class="panel-title">Scan history · 5 runs</div>
+      <div id="s4-title" class="panel-title">Scan history · 6 most recent of 20</div>
       <div id="s4-table">
         <div class="hist-row hist-header">
           <span>Time</span><span>Eff%</span><span>Prf</span><span>Wst</span><span>Model</span>
         </div>
-        <div id="s4-r1" class="hist-row"><span class="comment">05-28 14:02</span><span class="ok">68%</span><span>8</span><span>2</span><span>remote-model</span></div>
-        <div id="s4-r2" class="hist-row"><span class="comment">05-29 09:17</span><span class="ok">70%</span><span>8</span><span>2</span><span>local-llm</span></div>
-        <div id="s4-r3" class="hist-row"><span class="comment">05-30 11:41</span><span class="ok">72%</span><span>8</span><span>1</span><span>remote-model</span></div>
-        <div id="s4-r4" class="hist-row"><span class="comment">05-31 16:08</span><span class="ok">74%</span><span>8</span><span>1</span><span>remote-model</span></div>
-        <div id="s4-r5" class="hist-row"><span class="comment">06-01 10:23</span><span class="ok">75%</span><span>8</span><span>1</span><span>local-llm</span></div>
+        <div id="s4-r1" class="hist-row"><span class="comment">06-02 09:57</span><span class="ok">85%</span><span>8</span><span>1</span><span>grok-4.3</span></div>
+        <div id="s4-r2" class="hist-row"><span class="comment">06-02 10:15</span><span class="ok">85%</span><span>8</span><span>1</span><span>grok-4.3</span></div>
+        <div id="s4-r3" class="hist-row"><span class="comment">06-02 10:21</span><span class="ok">85%</span><span>8</span><span>1</span><span>grok-4.3</span></div>
+        <div id="s4-r4" class="hist-row"><span class="comment">06-02 12:36</span><span class="ok">85%</span><span>8</span><span>1</span><span>grok-4.3</span></div>
+        <div id="s4-r5" class="hist-row"><span class="comment">06-02 13:40</span><span class="ok">85%</span><span>8</span><span>1</span><span>grok-4.3</span></div>
+        <div id="s4-r6" class="hist-row"><span class="comment">06-02 13:48</span><span class="ok">85%</span><span>8</span><span>1</span><span>grok-4.3</span></div>
       </div>
-      <div id="s4-trend" class="trend-line">Trend · ↑7 (last 5 scans)</div>
-      <div class="disclaimer">Example scan history · persisted to ~/.local/share/agent0waste/history.json</div>
+      <div id="s4-trend" class="trend-line">Trend · stable at 85% across 6 most recent runs (10:21–13:48 today)</div>
+      <div class="disclaimer">Real scan history · persisted to ~/.local/share/agent0waste/history.json</div>
     </div>
 
     <!-- ══════════ SCENE 5: Efficiency Summary ══════════ -->
     <div class="scene" id="s5">
       <div id="s5-label" class="meter-label">CURRENT EFFICIENCY</div>
       <div id="s5-amount" class="meter-big">
-        <span id="s5-num">70</span><span class="pct">%</span>
+        <span id="s5-num">85</span><span class="pct">%</span>
       </div>
       <div class="bar-track"><div class="bar-fill bar-current" id="s5-bar-curr" style="width:0%"></div></div>
       <div class="meter-label">Efficiency</div>
@@ -267,25 +258,25 @@ Machine: M-series Mac · macOS</div>
       </div>
 
       <div class="meter-sub">
-        <div><div class="num" id="s5-profiles">2</div><div class="lbl">Waste items</div></div>
+        <div><div class="num" id="s5-profiles">1</div><div class="lbl">Waste items</div></div>
         <div><div class="num" id="s5-tools">8</div><div class="lbl">Profiles scanned</div></div>
         <div><div class="num" id="s5-flagged">1</div><div class="lbl">Profile flagged</div></div>
-        <div><div class="num" id="s5-model">rem</div><div class="lbl">Model type</div></div>
+        <div><div class="num" id="s5-model">xai</div><div class="lbl">Model type</div></div>
       </div>
       <div class="disclaimer">
-        Example output · efficiency based on tool_bloat + config_bloat detection
+        Real scan output · efficiency based on tool_bloat detection
       </div>
     </div>
 
     <!-- ══════════ SCENE 6: CTA ══════════ -->
     <div class="scene" id="s6">
       <div id="s6-title" class="cta-title">Try it on your machine</div>
-      <div id="s6-cmd" class="cmd-box"><span class="dollar">$</span>agent0waste scan</div>
-      <div id="s6-sub">No install needed · single binary · local-only</div>
+      <div id="s6-cmd" class="cmd-box"><span class="dollar">$</span>agent0waste</div>
+      <div id="s6-sub">Install: <span style="color:var(--accent)">cargo install --path .</span> · single binary · local-only</div>
       <div id="s6-links" class="cta-links">
-        <a href="#">GitHub</a>
-        <a href="#">Docs</a>
-        <a href="#">npm @hackerwynn/agent0waste</a>
+        <a href="https://github.com/beme08/Agent0Waste">GitHub</a>
+        <a href="https://github.com/beme08/Agent0Waste#readme">Docs</a>
+        <a href="https://github.com/beme08/Agent0Waste/releases/tag/v0.1.0-alpha">v0.1.0-alpha</a>
       </div>
       <div id="s6-logo" class="logo" style="margin-top: 60px; font-size: 28px; opacity: .4;">agent0<span>w</span>aste</div>
       <div class="disclaimer">Open-source · zero telemetry · runs entirely on your machine</div>
@@ -313,8 +304,7 @@ Machine: M-series Mac · macOS</div>
       tl.from("#s2-step", { x: -30, opacity: 0, duration: 0.4, ease: "expo.out" }, 4.2);
       tl.from("#s2-title", { y: 20, opacity: 0, duration: 0.5, ease: "power3.out" }, 4.4);
       tl.from("#s2-term", { y: 30, opacity: 0, duration: 0.6, ease: "power2.out" }, 4.6);
-      tl.from("#s2-term .mi", { scale: 1.3, opacity: 0, duration: 0.3, ease: "back.out" }, 7.2);
-      tl.from("#s2-term .ok", { scale: 1.3, opacity: 0, duration: 0.3, ease: "back.out" }, 7.8);
+      tl.from("#s2-term .wa", { scale: 1.3, opacity: 0, duration: 0.3, ease: "back.out" }, 7.2);
       tl.to("#s2", { opacity: 0, duration: 0.3 }, 11.0);
 
       /* ── Scene 3: Report (11.2–15.5s) ── */
@@ -322,7 +312,6 @@ Machine: M-series Mac · macOS</div>
       tl.from("#s3-step", { x: -30, opacity: 0, duration: 0.4, ease: "expo.out" }, 11.4);
       tl.from("#s3-title", { y: 20, opacity: 0, duration: 0.5, ease: "power3.out" }, 11.6);
       tl.from("#s3-card1", { x: -60, opacity: 0, duration: 0.6, ease: "power3.out" }, 12.0);
-      tl.from("#s3-card2", { x: -60, opacity: 0, duration: 0.6, ease: "power3.out" }, 12.4);
       tl.to("#s3", { opacity: 0, duration: 0.3 }, 15.5);
 
       /* ── Scene 4: History (16.2–20.7s) ── */
@@ -330,7 +319,7 @@ Machine: M-series Mac · macOS</div>
       tl.from("#s4-step", { x: -30, opacity: 0, duration: 0.4, ease: "expo.out" }, 16.4);
       tl.from("#s4-title", { y: 20, opacity: 0, duration: 0.5, ease: "power3.out" }, 16.6);
       tl.from("#s4-table", { y: 30, opacity: 0, duration: 0.6, ease: "power2.out" }, 16.8);
-      tl.from("#s4-r1,#s4-r2,#s4-r3,#s4-r4,#s4-r5", { x: -20, opacity: 0, duration: 0.2, stagger: 0.15, ease: "power2.out" }, 17.2);
+      tl.from("#s4-r1,#s4-r2,#s4-r3,#s4-r4,#s4-r5,#s4-r6", { x: -20, opacity: 0, duration: 0.2, stagger: 0.15, ease: "power2.out" }, 17.2);
       tl.from("#s4-trend", { y: 15, opacity: 0, duration: 0.4, ease: "power2.out" }, 18.2);
       tl.to("#s4", { opacity: 0, duration: 0.3 }, 20.7);
 
@@ -338,7 +327,7 @@ Machine: M-series Mac · macOS</div>
       tl.to("#s5", { opacity: 1, duration: 0.3 }, 21.2);
       tl.from("#s5-label", { y: 20, opacity: 0, duration: 0.5, ease: "power2.out" }, 21.4);
       tl.from("#s5-amount", { scale: 0.7, opacity: 0, duration: 0.7, ease: "back.out(1.7)" }, 21.7);
-      tl.to("#s5-bar-curr", { width: "70%", duration: 1.0, ease: "power2.out" }, 21.7);
+      tl.to("#s5-bar-curr", { width: "85%", duration: 1.0, ease: "power2.out" }, 21.7);
 
       tl.from("#s5-label2", { y: 20, opacity: 0, duration: 0.5, ease: "power2.out" }, 22.7);
       tl.from("#s5-num2", { scale: 0.7, opacity: 0, duration: 0.5, ease: "back.out(1.7)" }, 22.9);
