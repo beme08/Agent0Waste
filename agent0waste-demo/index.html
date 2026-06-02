@@ -16,14 +16,13 @@
         --mid: #f0c040;
         --green: #40dd80;
         --dim: #2a2a3a;
-        --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
       }
       * { margin:0; padding:0; box-sizing:border-box; }
       html, body {
         width: 1920px; height: 1080px;
         background: var(--bg);
         color: var(--fg);
-        font-family: var(--mono);
+        font-family: monospace;
         overflow: hidden;
       }
       .scene {
@@ -159,6 +158,7 @@
     </style>
   </head>
   <body>
+    <div data-composition-id="root" data-width="1920" data-height="1080" data-start="0" class="composition">
 
     <!-- ══════════ SCENE 1: Title ══════════ -->
     <div class="scene" id="s1">
@@ -292,10 +292,14 @@ Machine: M4 Pro 48GB · macOS 26.4.1</div>
     </div>
 
     <script>
-      const tl = gsap.timeline({ paused: true });
+      // Register on the global timeline registry. HyperFrames discovers
+      // compositions from window.__timelines[compositionId] — the key MUST
+      // match the data-composition-id on the root element.
+      window.__timelines = window.__timelines || {};
+      const tl = window.__timelines["root"] = gsap.timeline({ paused: true });
 
       // All scenes start hidden; we fade them in/out explicitly
-      tl.set(".scene", { opacity: 0 });
+      tl.set('[data-composition-id="root"] .scene', { opacity: 0 });
 
       /* ── Scene 1: Title (0–3.8s) ── */
       tl.to("#s1", { opacity: 1, duration: 0.3 }, 0);
@@ -356,5 +360,6 @@ Machine: M4 Pro 48GB · macOS 26.4.1</div>
 
       gsap.delayedCall(0.3, () => tl.play());
     </script>
+    </div><!-- /composition root -->
   </body>
 </html>
