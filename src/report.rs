@@ -1,8 +1,6 @@
 use crate::types::*;
 
 pub fn print_report(result: &ScanResult) {
-    println!("Agent0Waste — Local Token Waste Scanner\n");
-
     // Model line (demo target: grok-4.3)
     if let Some(model) = &result.model_info {
         let local = if model.is_local { "local" } else { "remote" };

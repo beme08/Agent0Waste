@@ -65,39 +65,79 @@ pub fn scan_hermes() -> Vec<ProfileInfo> {
     profiles
 }
 
-/// Detect the default model configuration from the default profile.
-pub fn detect_model() -> Option<ModelInfo> {
-    let default_path = get_hermes_base_dir().join("profiles/default/config.yaml");
-    if default_path.exists() {
-        if let Ok(contents) = fs::read_to_string(&default_path) {
-            let yaml: Value = serde_yaml::from_str(&contents).ok()?;
-            let name = yaml
-                .get("model")
-                .and_then(|m| m.get("default"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            let provider = yaml
-                .get("model")
-                .and_then(|m| m.get("provider"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            Some(ModelInfo {
-                name,
-                provider,
-                is_local: false,
-                context_window: yaml
-                    .get("model")
-                    .and_then(|m| m.get("context_length"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
-                cost_per_million: None,
-            })
-        } else {
-            None
-        }
+/// Known model context windows (tokens). Extend as needed.
+pub(crate) fn model_context_window(name: &str) -> u32 {
+    let n = name.to_lowercase();
+    if n.contains("qwen2.5") || n.contains("qwen-2.5") {
+        128000
+    } else if n.contains("claude-3-5") || n.contains("claude-3.5") {
+        200000
+    } else if n.contains("claude-3") {
+        200000
+    } else if n.contains("gpt-4o") || n.contains("gpt-4-turbo") {
+        128000
+    } else if n.contains("llama3.1") || n.contains("llama-3.1") {
+        128000
+    } else if n.contains("grok") {
+        128000
+    } else if n.contains("mistral") || n.contains("mixtral") {
+        128000
     } else {
-        None
+        8192 // safe default
     }
+}
+
+/// Detect the default model configuration.
+/// Checks ~/.hermes/config.yaml (active config) first, then profiles/default/config.yaml.
+pub fn detect_model() -> Option<ModelInfo> {
+    let base = get_hermes_base_dir();
+    let candidates = [
+        base.join("config.yaml"),                          // active config (most common)
+        base.join("profiles/default/config.yaml"),         // default profile
+    ];
+
+    for path in &candidates {
+        if path.exists() {
+            if let Ok(contents) = fs::read_to_string(path) {
+                if let Some(info) = parse_model_from_yaml(&contents) {
+                    return Some(info);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn parse_model_from_yaml(contents: &str) -> Option<ModelInfo> {
+    let yaml: Value = serde_yaml::from_str(contents).ok()?;
+    let name = yaml
+        .get("model")
+        .and_then(|m| m.get("default"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let provider = yaml
+        .get("model")
+        .and_then(|m| m.get("provider"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let ctx = yaml
+        .get("model")
+        .and_then(|m| m.get("context_length"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let context_window = if ctx > 0 { ctx } else { model_context_window(&name) };
+    let is_local = provider.contains("omlx")
+        || provider.contains("local")
+        || provider.contains("freellmapi")
+        || name.contains("mlx")
+        || name.contains("local");
+    Some(ModelInfo {
+        name,
+        provider,
+        is_local,
+        context_window,
+        cost_per_million: None,
+    })
 }

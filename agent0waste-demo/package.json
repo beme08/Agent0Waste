@@ -1,0 +1,11 @@
+{
+  "name": "agent0waste-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx --yes hyperframes@0.6.65 preview",
+    "check": "npx --yes hyperframes@0.6.65 lint && npx --yes hyperframes@0.6.65 validate && npx --yes hyperframes@0.6.65 inspect",
+    "render": "npx --yes hyperframes@0.6.65 render",
+    "publish": "npx --yes hyperframes@0.6.65 publish"
+  }
+}
