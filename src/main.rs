@@ -145,7 +145,6 @@ fn run_scan(
 
     // Phase 5: analyzing tools
     phase_bar(phases[4], 4, total);
-    let expensive_tools = scanner.count_expensive_tools();
     let _kanban_count = scanner.count_kanban_boards();
     let ram_gb = scanner.get_total_ram_gb().unwrap_or(32.0);
     std::thread::sleep(std::time::Duration::from_millis(delays[4]));
@@ -160,14 +159,26 @@ fn run_scan(
 
     let mut waste_items: Vec<WasteItem> = Vec::new();
 
-    if expensive_tools > 3 {
+    // tool_bloat: count expensive-named tools across all profile toolsets
+    // (same source as the per-profile "(N expensive)" line above, so the
+    // number in the waste line always matches the profile list).
+    let total_expensive: usize = hermes_profiles.iter().map(|p| p.expensive_tools.len()).sum();
+    if total_expensive > 0 {
+        let worst = hermes_profiles
+            .iter()
+            .max_by_key(|p| p.expensive_tools.len())
+            .unwrap();
+        let tool_names = worst.expensive_tools.join(", ");
+        let severity = if worst.expensive_tools.len() >= 3 { "high" } else { "medium" };
         waste_items.push(WasteItem {
             category: "tool_bloat".to_string(),
             description: format!(
-                "{} expensive tools enabled by default (web, browser, vision, etc.)",
-                expensive_tools
+                "{} expensive tools enabled by default in {} ({})",
+                worst.expensive_tools.len(),
+                worst.name,
+                tool_names
             ),
-            severity: "high".to_string(),
+            severity: severity.to_string(),
             estimated_savings: Some("~20-40k tokens/mo + lower RAM".to_string()),
         });
     }

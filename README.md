@@ -40,7 +40,7 @@ cargo build --release
 # Show scan history
 ./target/release/agent0waste history
 
-# Preview cleanup changes (dry run)
+# (clean is a no-op in v0.1 — Layer 2 ships in v0.2)
 ./target/release/agent0waste clean
 ```
 
@@ -67,12 +67,12 @@ Agent0Waste -- Local Token Waste Scanner
 Model     : grok-4.3 (xai-oauth)  [remote]
 
 Hermes profiles (8):
-  hermes-core          tools: 13  (2 expensive)
+  hermes-core          tools: 13  (3 expensive)
   hermes-cto           tools:  0  (clean)
   ...
 
 Waste detected:
-  [high] tool_bloat -- 7 expensive tools enabled by default (web, browser, vision, etc.)
+  [high] tool_bloat -- 3 expensive tools enabled by default in hermes-core (web, browser, computer_use)
        -> ~20-40k tokens/mo + lower RAM
 
 Efficiency: 85% [█████████████████░░░]

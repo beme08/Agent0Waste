@@ -15,6 +15,34 @@ fn get_hermes_profiles_dir() -> PathBuf {
     get_hermes_base_dir().join("profiles")
 }
 
+/// Tool name patterns considered "expensive" (token-heavy or API-cost-heavy).
+/// Single source of truth — used by both the per-profile detector and the
+/// waste aggregator so the profile list and the waste line always agree.
+pub const EXPENSIVE_PATTERNS: &[&str] = &[
+    "web",
+    "browser",
+    "vision",
+    "image_gen",
+    "tts",
+    "computer_use",
+    "x_search",
+];
+
+/// Count how many of the configured tools in a toolset string match the
+/// expensive-pattern list. Returns the matching tool names in encounter order.
+pub fn expensive_tools_in(tools_str: &str) -> Vec<String> {
+    let tools: Vec<String> = tools_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    tools
+        .iter()
+        .filter(|t| EXPENSIVE_PATTERNS.iter().any(|p| t.contains(p)))
+        .cloned()
+        .collect()
+}
+
 
 /// Scan all Hermes profiles for tool usage information.
 pub fn scan_hermes() -> Vec<ProfileInfo> {
@@ -41,11 +69,7 @@ pub fn scan_hermes() -> Vec<ProfileInfo> {
                                 .filter(|s| !s.is_empty())
                                 .collect();
                             let count = tools.len();
-                            let expensive: Vec<String> = tools
-                                .iter()
-                                .filter(|t| t.contains("web") || t.contains("browser"))
-                                .cloned()
-                                .collect();
+                            let expensive = expensive_tools_in(tools_str);
                             (count, expensive)
                         }
                         Err(_) => (0, vec![]),
