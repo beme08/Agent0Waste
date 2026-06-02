@@ -4,6 +4,7 @@ use std::io::Write;
 
 mod core;
 mod cost;
+mod hermes_state;
 mod history;
 mod macos;
 mod permission;
@@ -14,7 +15,7 @@ mod sessions;
 mod types;
 
 use core::{detect_model, scan_hermes};
-use cost::{format_table, report as cost_report, GroupBy};
+use cost::{format_table, report as cost_report, report_hermes, GroupBy};
 use history::HistoryEntry;
 use macos::MacOSScanner;
 use pricing::Pricing;
@@ -86,8 +87,8 @@ fn main() {
                 }
             }
         }
-        Some(Commands::Cost { by, since, export }) => {
-            run_cost(by.as_deref(), *since, export.as_deref());
+        Some(Commands::Cost { by, since, export, from_hermes, include_local }) => {
+            run_cost(by.as_deref(), *since, export.as_deref(), *from_hermes, *include_local);
         }
         None => {
             // Default: run a scan
@@ -152,12 +153,18 @@ enum Commands {
         /// Group by: total | model | provider | day
         #[arg(long, default_value = "total")]
         by: Option<String>,
-        /// Look back N days (default 7)
+        /// Look back N days (default 7). 0 = "always".
         #[arg(long, default_value_t = 7)]
         since: i64,
         /// Export format: json (other values = human table)
         #[arg(long)]
         export: Option<String>,
+        /// Read from ~/.hermes/state.db (real token data). Default: on.
+        #[arg(long, default_value_t = true)]
+        from_hermes: bool,
+        /// Also read from local session records. Default: off.
+        #[arg(long, default_value_t = false)]
+        include_local: bool,
     },
 }
 
@@ -407,11 +414,14 @@ fn run_sessions_list() {
     let _ = id_w; // silence unused warning when we eventually parameterize
 }
 
-fn run_cost(by: Option<&str>, since_days: i64, export: Option<&str>) {
+fn run_cost(
+    by: Option<&str>,
+    since_days: i64,
+    export: Option<&str>,
+    from_hermes: bool,
+    include_local: bool,
+) {
     let pricing = Pricing::load();
-    let s = Sessions::new();
-    let recs = s.list();
-
     let group_by = match by.unwrap_or("total") {
         "model" => GroupBy::Model,
         "provider" => GroupBy::Provider,
@@ -419,32 +429,87 @@ fn run_cost(by: Option<&str>, since_days: i64, export: Option<&str>) {
         _ => GroupBy::Total,
     };
 
-    // i64 days back from now; clamps to "always" when since_days <= 0.
+    // i64 days back from now; 0 = "always".
     let since = if since_days <= 0 {
         chrono::DateTime::<Utc>::from_timestamp(0, 0).unwrap()
     } else {
         Utc::now() - chrono::Duration::days(since_days)
     };
 
-    let rows = cost_report(&recs, &pricing, group_by, since);
+    // Source 1: Hermes state.db
+    let mut rows: Vec<cost::CostRow> = if from_hermes {
+        match hermes_state::default_state_path() {
+            Some(p) => match hermes_state::read_recent(since, &p) {
+                Ok(hermes_sessions) => {
+                    let r = report_hermes(&hermes_sessions, &pricing, group_by);
+                    if export != Some("json") {
+                        eprintln!("[agent0waste] read {} sessions from {}", hermes_sessions.len(), p.display());
+                    }
+                    r
+                }
+                Err(e) => {
+                    eprintln!("[agent0waste] warning: could not read {}: {}", p.display(), e);
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
+    // Source 2: local session records (opt-in via --include-local)
+    if include_local {
+        let recs = Sessions::new().list();
+        let local_rows = cost_report(&recs, &pricing, group_by, since);
+        // Merge by key: sum cost/sessions/tokens.
+        use std::collections::HashMap;
+        let mut by_key: HashMap<String, cost::CostRow> =
+            rows.into_iter().map(|r| (r.key.clone(), r)).collect();
+        for r in local_rows {
+            let entry = by_key.entry(r.key.clone()).or_insert(cost::CostRow {
+                key: r.key.clone(),
+                cost_usd: 0.0,
+                sessions: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+            });
+            entry.cost_usd += r.cost_usd;
+            entry.sessions += r.sessions;
+            entry.input_tokens += r.input_tokens;
+            entry.output_tokens += r.output_tokens;
+        }
+        rows = by_key.into_values().collect();
+        rows.sort_by(|a, b| b.cost_usd.partial_cmp(&a.cost_usd).unwrap_or(std::cmp::Ordering::Equal));
+    }
 
     if export == Some("json") {
         let out = serde_json::json!({
             "since": since.to_rfc3339(),
             "group_by": by.unwrap_or("total"),
+            "from_hermes": from_hermes,
+            "include_local": include_local,
             "rows": rows.iter().map(|r| serde_json::json!({
                 "key": r.key,
                 "cost_usd": r.cost_usd,
                 "sessions": r.sessions,
                 "input_tokens": r.input_tokens,
                 "output_tokens": r.output_tokens,
+                "cache_read_tokens": r.cache_read_tokens,
             })).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
     } else {
         println!("Agent0Waste — Cost Report");
-        println!("  group by : {}", by.unwrap_or("total"));
-        println!("  since    : last {} days (from {})", since_days, since.format("%Y-%m-%d"));
+        println!("  group by    : {}", by.unwrap_or("total"));
+        println!("  since       : last {} days (from {})", since_days, since.format("%Y-%m-%d"));
+        println!("  source      : {}", match (from_hermes, include_local) {
+            (true, true)  => "hermes + local",
+            (true, false) => "hermes only (default)",
+            (false, true) => "local only",
+            (false, false) => "none — pass --from-hermes or --include-local",
+        });
         println!();
         print!("{}", format_table(&rows));
     }
