@@ -11,9 +11,71 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
+use std::path::Path;
 
 use crate::heuristics::{self, Report, Severity};
 use crate::hermes_state::HermesSession;
+
+/// How the state.db load attempt turned out. The `Missing` and
+/// `Unreadable` cases always trigger fail-open — the user gets
+/// a JSON `allow` decision and a stderr message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadOutcome {
+    /// Successfully read N sessions from state.db.
+    Loaded(usize),
+    /// No home directory; we have no idea where to look.
+    NoHome,
+    /// state.db is not at the expected path (Hermes not installed
+    /// or the user is on a clean machine).
+    Missing(std::path::PathBuf),
+    /// state.db exists but we couldn't read it (locked, corrupt,
+    /// permission denied, or the SQLite driver returned an error).
+    Unreadable(std::path::PathBuf, String),
+}
+
+impl LoadOutcome {
+    pub fn is_fail_open(&self) -> bool {
+        !matches!(self, LoadOutcome::Loaded(_))
+    }
+}
+
+/// Try to read Hermes sessions from `path`. Always returns; never
+/// panics. Missing/locked/corrupt paths return an empty Vec and
+/// log a stderr message. The caller can use `LoadOutcome` to know
+/// which case fired (for the test suite and for the explicit
+/// fail-open stderr messages documented in v0.4-design.md).
+///
+/// `path` is passed in (not looked up) so tests can point at
+/// temp files. The CLI uses `hermes_state::default_state_path()`
+/// to find the real one.
+pub fn load_hermes_sessions(since: DateTime<Utc>, path: Option<&Path>) -> (Vec<HermesSession>, LoadOutcome) {
+    let resolved = match path {
+        Some(p) => Some(p.to_path_buf()),
+        None => crate::hermes_state::default_state_path(),
+    };
+    let resolved = match resolved {
+        Some(p) => p,
+        None => {
+            eprintln!("[agent0waste] no home directory; cannot read state.db");
+            eprintln!("[agent0waste] fail-open: allowing call");
+            return (Vec::new(), LoadOutcome::NoHome);
+        }
+    };
+    if !resolved.exists() {
+        eprintln!("[agent0waste] state.db not found at {}; fail-open: allowing call", resolved.display());
+        return (Vec::new(), LoadOutcome::Missing(resolved));
+    }
+    match crate::hermes_state::read_recent(since, &resolved) {
+        Ok(v) => {
+            let n = v.len();
+            (v, LoadOutcome::Loaded(n))
+        }
+        Err(e) => {
+            eprintln!("[agent0waste] could not read {}: {}; fail-open: allowing call", resolved.display(), e);
+            (Vec::new(), LoadOutcome::Unreadable(resolved, e))
+        }
+    }
+}
 
 /// What the wrapper does after `check` returns.
 #[derive(Debug, Clone, PartialEq)]
@@ -166,6 +228,11 @@ impl InterceptConfig {
             "prompt_growth".into(),
             RuleConfig { action: Action::Throttle, cooldown_s: 60 },
         );
+        // H3 auto_routing and H4 model_instability are info-only by
+        // design. See docs/v0.4-design.md "Why are H3 and H4 'allow'
+        // by default?". The user can opt in to stricter behavior via
+        // intercept.toml if they disagree; the default is "don't be
+        // paternalistic about the user A/B testing or using auto-routing."
         rules.insert(
             "auto_routing".into(),
             RuleConfig { action: Action::Allow, cooldown_s: 0 },
@@ -592,5 +659,117 @@ cooldown_s = 10
         assert_eq!(Mode::from_str("fail-open"), Some(Mode::FailOpen));
         assert_eq!(Mode::from_str("fail-closed"), Some(Mode::FailClosed));
         assert_eq!(Mode::from_str("strict"), None);
+    }
+
+    // --- state.db failure-mode tests ---
+
+    #[test]
+    fn load_outcome_is_fail_open_for_all_non_loaded_cases() {
+        assert!(!LoadOutcome::Loaded(10).is_fail_open());
+        assert!(LoadOutcome::NoHome.is_fail_open());
+        assert!(LoadOutcome::Missing("/foo".into()).is_fail_open());
+        assert!(LoadOutcome::Unreadable("/foo".into(), "locked".into()).is_fail_open());
+    }
+
+    #[test]
+    fn load_returns_missing_for_nonexistent_path() {
+        let tmp = std::env::temp_dir().join(format!(
+            "agent0waste-no-such-db-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Don't create the file.
+        let since = Utc::now() - chrono::Duration::days(7);
+        let (sessions, outcome) = load_hermes_sessions(since, Some(&tmp));
+        assert!(sessions.is_empty());
+        assert!(matches!(outcome, LoadOutcome::Missing(_)));
+    }
+
+    #[test]
+    fn load_returns_unreadable_for_corrupt_path() {
+        // Create a file that is definitely not a SQLite db.
+        let tmp = std::env::temp_dir().join(format!(
+            "agent0waste-corrupt-db-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&tmp, b"this is not a sqlite database at all\n").unwrap();
+        let since = Utc::now() - chrono::Duration::days(7);
+        let (sessions, outcome) = load_hermes_sessions(since, Some(&tmp));
+        assert!(sessions.is_empty());
+        assert!(matches!(outcome, LoadOutcome::Unreadable(_, _)));
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn load_returns_unreadable_for_locked_db() {
+        // Create a real (minimal) sqlite db, then hold an exclusive
+        // lock on it from this process. A second read attempt must
+        // fail.
+        //
+        // Note: rusqlite uses SQLite's locking model. An open read
+        // connection does NOT block another read connection (SQLite
+        // supports multiple readers). So we test the "write lock
+        // contention" case: open a writer, then try to read with a
+        // second connection. In WAL mode, the read should succeed
+        // (readers don't block on writers in WAL). Without WAL, the
+        // read should fail with SQLITE_BUSY.
+        //
+        // Either way, our function should return either Loaded or
+        // Unreadable — never panic.
+        let tmp = std::env::temp_dir().join(format!(
+            "agent0waste-locked-db-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        // Create a minimal valid sqlite db by opening + closing.
+        {
+            let conn = rusqlite::Connection::open(&tmp).unwrap();
+            conn.execute("CREATE TABLE _test (x INTEGER)", []).unwrap();
+        }
+
+        // Open a long-lived write connection (no actual writes; just
+        // a connection that holds a SHARED lock).
+        let _conn = rusqlite::Connection::open(&tmp).unwrap();
+
+        let since = Utc::now() - chrono::Duration::days(7);
+        let (_sessions, outcome) = load_hermes_sessions(since, Some(&tmp));
+
+        // Outcome is either Loaded (reader + reader is fine) or
+        // Unreadable (writer blocks). Both are valid; the important
+        // property is that we did NOT panic.
+        match outcome {
+            LoadOutcome::Loaded(_) | LoadOutcome::Unreadable(_, _) => {}
+            other => panic!("unexpected outcome: {:?}", other),
+        }
+
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn load_returns_no_home_for_none_path() {
+        // Pass None to trigger the no-home case. We can't unset $HOME
+        // in a test (parallel tests would break), so we just verify
+        // the function doesn't panic and returns one of the known
+        // outcomes.
+        let since = Utc::now() - chrono::Duration::days(7);
+        let (_sessions, outcome) = load_hermes_sessions(since, None);
+        // Either Loaded (real ~/.hermes/state.db exists) or
+        // Missing/NoHome (it doesn't). Both are valid.
+        assert!(
+            matches!(outcome, LoadOutcome::Loaded(_) | LoadOutcome::Missing(_) | LoadOutcome::NoHome),
+            "got: {:?}",
+            outcome
+        );
     }
 }

@@ -473,12 +473,17 @@ enum InterceptAction {
     Status,
     /// Install the wrapper and shell alias (stub for v0.4.0).
     Enable {
+        /// Command name to wrap (e.g. "hermes", "claude").
+        command: String,
         /// Use fail-closed mode instead of fail-open (v0.4.1+).
         #[arg(long)]
         strict: bool,
     },
     /// Remove the wrapper and shell alias (stub for v0.4.0).
-    Disable,
+    Disable {
+        /// Command name to remove the shim for.
+        command: String,
+    },
     /// Show the rule table that `check` consults.
     Rules,
 }
@@ -619,13 +624,15 @@ fn run_intercept(action: &InterceptAction) {
         InterceptAction::Status => {
             run_intercept_status();
         }
-        InterceptAction::Enable { strict: _ } => {
-            eprintln!("[agent0waste] intercept enable is not implemented in this build");
-            eprintln!("see docs/v0.4-design.md for the planned implementation");
+        InterceptAction::Enable { command, strict: _ } => {
+            eprintln!("[agent0waste] intercept enable {} is not implemented in this build", command);
+            eprintln!("planned: installs a shim in ~/.local/bin/{} (no RC file edits)", command);
+            eprintln!("see docs/v0.4-design.md for the shim-binary approach");
             std::process::exit(70);
         }
-        InterceptAction::Disable => {
-            eprintln!("[agent0waste] intercept disable is not implemented in this build");
+        InterceptAction::Disable { command } => {
+            eprintln!("[agent0waste] intercept disable {} is not implemented in this build", command);
+            eprintln!("planned: removes ~/.local/bin/{} shim", command);
             std::process::exit(70);
         }
         InterceptAction::Rules => {
@@ -649,25 +656,12 @@ fn run_intercept_check(
         Utc::now() - chrono::Duration::days(since_days)
     };
 
-    let sessions: Vec<hermes_state::HermesSession> = match hermes_state::default_state_path() {
-        Some(p) => match hermes_state::read_recent(since, &p) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("[agent0waste] warning: could not read {}: {}", p.display(), e);
-                eprintln!("[agent0waste] fail-open: allowing call");
-                let allow = Decision::Allow;
-                println!("{}", allow.to_json());
-                std::process::exit(allow.exit_code());
-            }
-        },
-        None => {
-            eprintln!("[agent0waste] warning: no home directory; cannot read state.db");
-            eprintln!("[agent0waste] fail-open: allowing call");
-            let allow = Decision::Allow;
-            println!("{}", allow.to_json());
-            std::process::exit(allow.exit_code());
-        }
-    };
+    let (sessions, outcome) = intercept::load_hermes_sessions(since, None);
+    if outcome.is_fail_open() {
+        let allow = Decision::Allow;
+        println!("{}", allow.to_json());
+        std::process::exit(allow.exit_code());
+    }
 
     let cfg = InterceptConfig::load();
     let hint = CheckHint {
