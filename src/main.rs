@@ -445,6 +445,117 @@ enum PricingAction {
 // Interception (Layer 4)
 // ---------------------------------------------------------------------------
 
+/// The shim template installed by `intercept enable <command>`.
+///
+/// `__COMMAND__` is replaced with the real command name (e.g. "hermes").
+/// `__TIMEOUT__` is replaced with the install-time timeout (5s default).
+/// `__AGENT0WASTE_PATH__` is replaced with the absolute path to the
+/// `agent0waste` binary that ran `intercept enable`. The shim uses
+/// this absolute path so the user does NOT need `agent0waste` on
+/// their PATH (cargo-installed binaries often aren't on PATH until
+/// the user explicitly adds `~/.cargo/bin`).
+///
+/// The shim is a 1-purpose file: it execs `agent0waste intercept run --`
+/// with the same args, after finding the real binary. The real work
+/// (Layer 4 decision + Layer 2 recording) happens in `intercept run`.
+///
+/// Fail-open behaviors live in `intercept run`. The shim itself only
+/// has to (a) be earlier on $PATH than the real command, and (b) find
+/// the real command without recursing into itself.
+const SHIM_TEMPLATE: &str = r#"#!/usr/bin/env bash
+# Installed by agent0waste intercept enable v0.4.0
+# Command: __COMMAND__
+# Timeout: __TIMEOUT__s
+# Agent0waste: __AGENT0WASTE_PATH__
+# Disable: agent0waste intercept disable __COMMAND__
+# Audit:   cat "$0"
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Find the real binary, excluding our own directory. If the real
+# binary isn't on PATH (e.g. user removed Homebrew), fall back to
+# running the command name and hoping $PATH has it; the shim itself
+# wins either way because we strip our dir.
+find_real() {
+    local stripped
+    stripped="$(echo "$PATH" | tr ':' '\n' | grep -vFx "$SELF_DIR" | paste -sd: -)"
+    if [ -n "$stripped" ]; then
+        PATH="$stripped" command -v "__COMMAND__" 2>/dev/null || echo "__COMMAND__"
+    else
+        echo "__COMMAND__"
+    fi
+}
+
+REAL="$(find_real)"
+exec "__AGENT0WASTE_PATH__" intercept run -- "$REAL" "$@"
+"#;
+
+/// Default timeout (in seconds) for the shim's intercept check call.
+/// v0.4.0 ships with 5s; v0.4.1+ targets 500ms once heuristic output
+/// is cached.
+const DEFAULT_INTERCEPT_TIMEOUT_S: u64 = 5;
+
+/// Path to `~/.local/bin`. We use this for shim installation because
+/// it's the cross-shell, cross-platform convention that's typically
+/// on $PATH. We do NOT edit any shell RC file.
+fn local_bin() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".local").join("bin"))
+}
+
+fn shim_path(command: &str) -> Option<PathBuf> {
+    local_bin().map(|p| p.join(command))
+}
+
+/// Resolve the real `command` on PATH, excluding `~/.local/bin` (where
+/// the shim lives). Used at `intercept enable` time to record the
+/// real path in the install message; the shim does its own resolution
+/// at run time so it stays correct if the user changes their setup.
+fn find_real_command(command: &str) -> Option<String> {
+    let stripped = match local_bin() {
+        Some(p) => {
+            let p_str = p.to_string_lossy().to_string();
+            std::env::var("PATH").ok().map(|path| {
+                path.split(':')
+                    .filter(|d| *d != p_str)
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+        }
+        None => std::env::var("PATH").ok(),
+    };
+    stripped
+        .as_deref()
+        .and_then(|p| {
+            // Spawn `which` in a child process with the stripped PATH.
+            // This is what the shim does at run time; we replicate it
+            // here at install time so the user can see what was found.
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!("PATH='{}' command -v {}", p, command))
+                .output()
+                .ok()
+        })
+        .and_then(|out| {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if s.is_empty() { None } else { Some(s) }
+            } else {
+                None
+            }
+        })
+}
+
+/// Absolute path to the running `agent0waste` binary. Baked into the
+/// shim at install time so the shim does not depend on
+/// `agent0waste` being on the user's PATH.
+fn current_exe_path() -> String {
+    std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "agent0waste".to_string())
+}
+
 #[derive(Subcommand)]
 enum InterceptAction {
     /// Run heuristics against the current state and emit a JSON decision.
@@ -486,6 +597,19 @@ enum InterceptAction {
     },
     /// Show the rule table that `check` consults.
     Rules,
+    /// Layer 4 + Layer 2: check, then spawn the real command, then
+    /// record the session. Used by the shim.
+    ///
+    /// Usage:  agent0waste intercept run -- <real-binary> <args...>
+    ///
+    /// The first arg after `--` is the absolute path to the real
+    /// binary (recorded at `intercept enable` time). The shim finds
+    /// it, and intercept run spawns it after the check passes.
+    Run {
+        /// Catch-all for clap so trailing args aren't rejected.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        _args: Vec<String>,
+    },
 }
 
 fn override_path() -> PathBuf {
@@ -624,19 +748,35 @@ fn run_intercept(action: &InterceptAction) {
         InterceptAction::Status => {
             run_intercept_status();
         }
-        InterceptAction::Enable { command, strict: _ } => {
-            eprintln!("[agent0waste] intercept enable {} is not implemented in this build", command);
-            eprintln!("planned: installs a shim in ~/.local/bin/{} (no RC file edits)", command);
-            eprintln!("see docs/v0.4-design.md for the shim-binary approach");
-            std::process::exit(70);
+        InterceptAction::Enable { command, strict } => {
+            run_intercept_enable(command, *strict);
         }
         InterceptAction::Disable { command } => {
-            eprintln!("[agent0waste] intercept disable {} is not implemented in this build", command);
-            eprintln!("planned: removes ~/.local/bin/{} shim", command);
-            std::process::exit(70);
+            run_intercept_disable(command);
         }
         InterceptAction::Rules => {
             run_intercept_rules();
+        }
+        InterceptAction::Run { .. } => {
+            // `agent0waste intercept run -- <real-binary> <args...>`
+            // The shim execs us with:  intercept run -- "$REAL" "$@"
+            // so $0 is "intercept run" and the first argv after `--`
+            // is the real binary path.
+            let argv: Vec<String> = std::env::args().collect();
+            let (_cmd, args) = run::split_run_args(&argv)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {}", e);
+                    eprintln!();
+                    eprintln!("usage:  agent0waste intercept run -- <real-binary> [args...]");
+                    std::process::exit(run::EXIT_BAD_ARGS);
+                });
+            if args.is_empty() {
+                eprintln!("error: missing <real-binary> after `--`");
+                std::process::exit(run::EXIT_BAD_ARGS);
+            }
+            let real_binary = &args[0];
+            let real_args: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
+            run_intercept_run(real_binary, &real_args);
         }
     }
 }
@@ -728,6 +868,200 @@ fn run_intercept_rules() {
     }
     println!();
     println!("override in ~/.config/agent0waste/intercept.toml");
+}
+
+/// Layer 4 + Layer 2: check, then act, then spawn + record.
+///
+/// Called by the shim with:  intercept run -- <real-binary> <args...>
+/// or by the user directly:  agent0waste intercept run -- hermes run foo
+fn run_intercept_run(real_binary: &str, real_args: &[&str]) {
+    // 1. Decide. Reuse the same logic as `intercept check`. We bypass
+    //    the `intercept check` subcommand because we're already inside
+    //    agent0waste; shelling out would be silly.
+    let since = Utc::now() - chrono::Duration::days(7);
+    let (sessions, outcome) = intercept::load_hermes_sessions(since, None);
+
+    // 2. Fail-open paths. Emit a distinct stderr message, then run
+    //    the real command unwrapped. (state.db failure modes already
+    //    logged their own message in load_hermes_sessions.)
+    if outcome.is_fail_open() {
+        // Don't re-log; load_hermes_sessions already did.
+        spawn_and_record(real_binary, real_args);
+        return;
+    }
+
+    let cfg = InterceptConfig::load();
+    let cmd_str = real_args.join(" ");
+    let hint = CheckHint {
+        model: None, // the shim doesn't know the model; leave None
+        tokens: None,
+        command: if cmd_str.is_empty() { None } else { Some(cmd_str) },
+        source: Some("cli".into()),
+    };
+
+    let decision = intercept_check(&sessions, since, &cfg, &hint);
+
+    // 3. Act on the decision.
+    match decision {
+        Decision::Allow => {
+            spawn_and_record(real_binary, real_args);
+        }
+        Decision::Throttle { cooldown_s, reason, .. } => {
+            eprintln!("[agent0waste] throttle: {}", reason);
+            eprintln!("[agent0waste] sleeping {}s, then re-checking...", cooldown_s);
+            std::thread::sleep(std::time::Duration::from_secs(cooldown_s));
+            // Re-check with the same data. If still throttling, run
+            // anyway (the wrapper is a guardrail, not a gate).
+            let decision2 = intercept_check(&sessions, since, &cfg, &hint);
+            match decision2 {
+                Decision::Throttle { reason, .. } => {
+                    eprintln!("[agent0waste] still throttled: {}", reason);
+                    eprintln!("[agent0waste] running anyway");
+                }
+                Decision::Prompt { reason, hint } => {
+                    prompt_user(&reason, hint.as_deref());
+                }
+                _ => {}
+            }
+            spawn_and_record(real_binary, real_args);
+        }
+        Decision::Prompt { reason, hint } => {
+            prompt_user(&reason, hint.as_deref());
+            spawn_and_record(real_binary, real_args);
+        }
+    }
+}
+
+fn prompt_user(reason: &str, hint: Option<&str>) {
+    eprintln!("[agent0waste] prompt: {}", reason);
+    if let Some(h) = hint {
+        eprintln!("[agent0waste] hint:   {}", h);
+    }
+    eprintln!("[agent0waste] continue? [y/N]");
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        eprintln!("[agent0waste] (could not read stdin; cancelling)");
+        std::process::exit(1);
+    }
+    let ans = line.trim();
+    if !ans.eq_ignore_ascii_case("y") {
+        eprintln!("[agent0waste] cancelled");
+        std::process::exit(1);
+    }
+}
+
+fn spawn_and_record(real_binary: &str, real_args: &[&str]) {
+    match run::run_and_record(real_binary, real_args) {
+        Ok(rec) => {
+            // Apply cost if pricing known — non-fatal.
+            let pricing = Pricing::load();
+            let sessions = Sessions::new();
+            let list = sessions.list();
+            if let Some(mut r) = list.into_iter().find(|r| r.id == rec.id) {
+                sessions::Sessions::apply_cost(&mut r, &pricing);
+            }
+            std::process::exit(rec.exit_code);
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(run::EXIT_BAD_ARGS);
+        }
+    }
+}
+
+/// Install a shim for `command` at `~/.local/bin/<command>`.
+fn run_intercept_enable(command: &str, _strict: bool) {
+    let Some(bin) = local_bin() else {
+        eprintln!("[agent0waste] no home directory; cannot determine ~/.local/bin");
+        std::process::exit(70);
+    };
+    let shim = bin.join(command);
+
+    if shim.exists() {
+        eprintln!(
+            "[agent0waste] {} already exists; refusing to overwrite",
+            shim.display()
+        );
+        eprintln!("use --force to overwrite, or `agent0waste intercept disable {}` first", command);
+        std::process::exit(70);
+    }
+
+    // Create ~/.local/bin if missing.
+    if let Err(e) = std::fs::create_dir_all(&bin) {
+        eprintln!("[agent0waste] could not create {}: {}", bin.display(), e);
+        std::process::exit(70);
+    }
+
+    // Resolve the real binary for the install message (the shim does
+    // its own resolution at run time).
+    let real = find_real_command(command).unwrap_or_else(|| command.to_string());
+
+    let contents = SHIM_TEMPLATE
+        .replace("__COMMAND__", command)
+        .replace("__TIMEOUT__", &DEFAULT_INTERCEPT_TIMEOUT_S.to_string())
+        .replace("__AGENT0WASTE_PATH__", &current_exe_path());
+
+    if let Err(e) = std::fs::write(&shim, contents) {
+        eprintln!("[agent0waste] could not write {}: {}", shim.display(), e);
+        std::process::exit(70);
+    }
+
+    // chmod +x. Use std::os::unix::fs::PermissionsExt to avoid pulling
+    // in a Windows compat layer.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        if let Err(e) = std::fs::set_permissions(&shim, perms) {
+            eprintln!("[agent0waste] could not chmod +x {}: {}", shim.display(), e);
+            std::process::exit(70);
+        }
+    }
+
+    // Also ensure intercept.toml exists with defaults.
+    let toml_path = intercept_toml_path();
+    if let Some(p) = &toml_path {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if !p.exists() {
+            let _ = std::fs::write(
+                p,
+                "# Agent0Waste intercept config\n# mode = \"fail-open\"  # or \"fail-closed\" (v0.4.1+)\n#\n# [rules.cache_bloat]\n# action = \"throttle\"\n# cooldown_s = 30\n",
+            );
+        }
+    }
+
+    println!("installed shim: {}", shim.display());
+    println!("real binary  : {}", real);
+    println!();
+    println!("audit   : cat {}", shim.display());
+    println!("disable : agent0waste intercept disable {}", command);
+    if std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .all(|d| d != bin.to_string_lossy())
+    {
+        println!();
+        println!("note: {} is not on your PATH", bin.display());
+        println!("add this to your shell rc:  export PATH=\"$HOME/.local/bin:$PATH\"");
+    }
+}
+
+fn run_intercept_disable(command: &str) {
+    let Some(shim) = shim_path(command) else {
+        eprintln!("[agent0waste] no home directory; cannot determine ~/.local/bin");
+        std::process::exit(70);
+    };
+    if !shim.exists() {
+        eprintln!("no shim at {} — nothing to disable", shim.display());
+        return;
+    }
+    if let Err(e) = std::fs::remove_file(&shim) {
+        eprintln!("[agent0waste] could not remove {}: {}", shim.display(), e);
+        std::process::exit(70);
+    }
+    println!("removed {}", shim.display());
 }
 
 fn run_sessions_list() {
