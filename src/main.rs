@@ -459,9 +459,9 @@ enum PricingAction {
 /// with the same args, after finding the real binary. The real work
 /// (Layer 4 decision + Layer 2 recording) happens in `intercept run`.
 ///
-/// Fail-open behaviors live in `intercept run`. The shim itself only
-/// has to (a) be earlier on $PATH than the real command, and (b) find
-/// the real command without recursing into itself.
+/// Fail-open behaviors live in the shim: a hard timeout around
+/// `intercept run` (5s default), with a distinct stderr message
+/// and direct exec of the real command if the timeout fires.
 const SHIM_TEMPLATE: &str = r#"#!/usr/bin/env bash
 # Installed by agent0waste intercept enable v0.4.0
 # Command: __COMMAND__
@@ -469,26 +469,67 @@ const SHIM_TEMPLATE: &str = r#"#!/usr/bin/env bash
 # Agent0waste: __AGENT0WASTE_PATH__
 # Disable: agent0waste intercept disable __COMMAND__
 # Audit:   cat "$0"
-set -euo pipefail
+set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Find the real binary, excluding our own directory. If the real
-# binary isn't on PATH (e.g. user removed Homebrew), fall back to
-# running the command name and hoping $PATH has it; the shim itself
-# wins either way because we strip our dir.
+# Find the real binary, excluding our own directory. We need to
+# handle the shell-builtin trap (e.g. `echo` is a bash builtin on
+# macOS; `command -v echo` returns the literal "echo" which would
+# make the shim recurse into itself). The robust way is to walk
+# PATH ourselves, find the first executable file, and verify it's
+# not a directory or alias to the shim.
 find_real() {
+    local name="__COMMAND__"
+    local d
     local stripped
     stripped="$(echo "$PATH" | tr ':' '\n' | grep -vFx "$SELF_DIR" | paste -sd: -)"
-    if [ -n "$stripped" ]; then
-        PATH="$stripped" command -v "__COMMAND__" 2>/dev/null || echo "__COMMAND__"
-    else
-        echo "__COMMAND__"
-    fi
+    # Split stripped on : and walk each dir.
+    echo "$stripped" | tr ':' '\n' | while IFS= read -r d; do
+        if [ -z "$d" ]; then continue; fi
+        if [ -x "$d/$name" ] && [ ! -d "$d/$name" ]; then
+            echo "$d/$name"
+            return 0
+        fi
+    done
+    # Fallback: command not on PATH (or only the shim dir had it).
+    # Print nothing — intercept run will fail loudly, which is
+    # better than the shim silently recursing.
 }
 
 REAL="$(find_real)"
-exec "__AGENT0WASTE_PATH__" intercept run -- "$REAL" "$@"
+TIMEOUT="${AGENT0WASTE_INTERCEPT_TIMEOUT:-__TIMEOUT__}"
+
+# Run intercept run in the background with a hard timeout. If the
+# timeout fires, log a stderr message and exec the real command
+# directly (fail-open: the guardrail is bypassed, the user is told).
+"__AGENT0WASTE_PATH__" intercept run -- "$REAL" "$@" &
+child_pid=$!
+(
+    sleep "$TIMEOUT" 2>/dev/null || true
+    if kill -0 "$child_pid" 2>/dev/null; then
+        echo "[agent0waste: check timed out (${TIMEOUT}s); running unwrapped]" >&2
+        kill -TERM "$child_pid" 2>/dev/null || true
+        sleep 0.2 2>/dev/null || true
+        kill -KILL "$child_pid" 2>/dev/null || true
+    fi
+) &
+timer_pid=$!
+
+wait "$child_pid" 2>/dev/null
+rc=$?
+
+# Cancel the timer if it's still pending.
+kill "$timer_pid" 2>/dev/null || true
+wait "$timer_pid" 2>/dev/null || true
+
+# If the child was killed by the timer (rc 143 = SIGTERM, 137 = SIGKILL,
+# 124 = GNU timeout), fall through to running the real command.
+if [ "$rc" = "143" ] || [ "$rc" = "137" ] || [ "$rc" = "124" ]; then
+    exec "$REAL" "$@"
+fi
+
+exit $rc
 "#;
 
 /// Default timeout (in seconds) for the shim's intercept check call.
@@ -511,6 +552,11 @@ fn shim_path(command: &str) -> Option<PathBuf> {
 /// the shim lives). Used at `intercept enable` time to record the
 /// real path in the install message; the shim does its own resolution
 /// at run time so it stays correct if the user changes their setup.
+///
+/// Uses `type -p` (not `command -v`) to avoid the shell-builtin trap
+/// (e.g. `echo` on macOS is a builtin, and `command -v echo` returns
+/// the literal "echo" which would cause the shim to recurse into
+/// itself).
 fn find_real_command(command: &str) -> Option<String> {
     let stripped = match local_bin() {
         Some(p) => {
@@ -527,12 +573,9 @@ fn find_real_command(command: &str) -> Option<String> {
     stripped
         .as_deref()
         .and_then(|p| {
-            // Spawn `which` in a child process with the stripped PATH.
-            // This is what the shim does at run time; we replicate it
-            // here at install time so the user can see what was found.
             std::process::Command::new("bash")
                 .arg("-c")
-                .arg(format!("PATH='{}' command -v {}", p, command))
+                .arg(format!("PATH='{}' type -p {}", p, command))
                 .output()
                 .ok()
         })
