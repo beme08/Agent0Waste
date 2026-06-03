@@ -285,13 +285,16 @@ mod tests {
     /// suffix. The directory is removed on Drop.
     mod tempfile_like {
         use std::path::PathBuf;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
         pub struct Tmp(pub PathBuf);
         impl Tmp {
             pub fn new() -> Self {
                 let mut p = std::env::temp_dir();
                 let n: u64 = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
-                p.push(format!("agent0waste-sessions-test-{}-{}", n, std::process::id()));
+                let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+                p.push(format!("agent0waste-sessions-test-{}-{}-{}", n, std::process::id(), seq));
                 std::fs::create_dir_all(&p).unwrap();
                 Tmp(p)
             }

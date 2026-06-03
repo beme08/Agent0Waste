@@ -346,7 +346,7 @@ mod tests {
         // even when the model is recorded as "openrouter/grok-4.3".
         // Use the public load_override + a temp file.
         let mut pricing = Pricing::default();
-        let tmp = std::env::temp_dir().join(format!("agent0waste-test-{}.toml", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("agent0waste-test-pricing-{}.toml", std::process::id()));
         std::fs::write(&tmp, "[\"grok-4.3\"]\ninput = 5.00\noutput = 15.00\n").unwrap();
         pricing.load_override(&tmp).unwrap();
         std::fs::remove_file(&tmp).ok();
