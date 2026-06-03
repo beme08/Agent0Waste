@@ -459,9 +459,9 @@ enum PricingAction {
 /// with the same args, after finding the real binary. The real work
 /// (Layer 4 decision + Layer 2 recording) happens in `intercept run`.
 ///
-/// Fail-open behaviors live in `intercept run`. The shim itself only
-/// has to (a) be earlier on $PATH than the real command, and (b) find
-/// the real command without recursing into itself.
+/// Fail-open behaviors live in the shim: a hard timeout around
+/// `intercept run` (5s default), with a distinct stderr message
+/// and direct exec of the real command if the timeout fires.
 const SHIM_TEMPLATE: &str = r#"#!/usr/bin/env bash
 # Installed by agent0waste intercept enable v0.4.0
 # Command: __COMMAND__
@@ -469,26 +469,67 @@ const SHIM_TEMPLATE: &str = r#"#!/usr/bin/env bash
 # Agent0waste: __AGENT0WASTE_PATH__
 # Disable: agent0waste intercept disable __COMMAND__
 # Audit:   cat "$0"
-set -euo pipefail
+set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Find the real binary, excluding our own directory. If the real
-# binary isn't on PATH (e.g. user removed Homebrew), fall back to
-# running the command name and hoping $PATH has it; the shim itself
-# wins either way because we strip our dir.
+# Find the real binary, excluding our own directory. We need to
+# handle the shell-builtin trap (e.g. `echo` is a bash builtin on
+# macOS; `command -v echo` returns the literal "echo" which would
+# make the shim recurse into itself). The robust way is to walk
+# PATH ourselves, find the first executable file, and verify it's
+# not a directory or alias to the shim.
 find_real() {
+    local name="__COMMAND__"
+    local d
     local stripped
     stripped="$(echo "$PATH" | tr ':' '\n' | grep -vFx "$SELF_DIR" | paste -sd: -)"
-    if [ -n "$stripped" ]; then
-        PATH="$stripped" command -v "__COMMAND__" 2>/dev/null || echo "__COMMAND__"
-    else
-        echo "__COMMAND__"
-    fi
+    # Split stripped on : and walk each dir.
+    echo "$stripped" | tr ':' '\n' | while IFS= read -r d; do
+        if [ -z "$d" ]; then continue; fi
+        if [ -x "$d/$name" ] && [ ! -d "$d/$name" ]; then
+            echo "$d/$name"
+            return 0
+        fi
+    done
+    # Fallback: command not on PATH (or only the shim dir had it).
+    # Print nothing — intercept run will fail loudly, which is
+    # better than the shim silently recursing.
 }
 
 REAL="$(find_real)"
-exec "__AGENT0WASTE_PATH__" intercept run -- "$REAL" "$@"
+TIMEOUT="${AGENT0WASTE_INTERCEPT_TIMEOUT:-__TIMEOUT__}"
+
+# Run intercept run in the background with a hard timeout. If the
+# timeout fires, log a stderr message and exec the real command
+# directly (fail-open: the guardrail is bypassed, the user is told).
+"__AGENT0WASTE_PATH__" intercept run -- "$REAL" "$@" &
+child_pid=$!
+(
+    sleep "$TIMEOUT" 2>/dev/null || true
+    if kill -0 "$child_pid" 2>/dev/null; then
+        echo "[agent0waste: check timed out (${TIMEOUT}s); running unwrapped]" >&2
+        kill -TERM "$child_pid" 2>/dev/null || true
+        sleep 0.2 2>/dev/null || true
+        kill -KILL "$child_pid" 2>/dev/null || true
+    fi
+) &
+timer_pid=$!
+
+wait "$child_pid" 2>/dev/null
+rc=$?
+
+# Cancel the timer if it's still pending.
+kill "$timer_pid" 2>/dev/null || true
+wait "$timer_pid" 2>/dev/null || true
+
+# If the child was killed by the timer (rc 143 = SIGTERM, 137 = SIGKILL,
+# 124 = GNU timeout), fall through to running the real command.
+if [ "$rc" = "143" ] || [ "$rc" = "137" ] || [ "$rc" = "124" ]; then
+    exec "$REAL" "$@"
+fi
+
+exit $rc
 "#;
 
 /// Default timeout (in seconds) for the shim's intercept check call.
@@ -496,43 +537,74 @@ exec "__AGENT0WASTE_PATH__" intercept run -- "$REAL" "$@"
 /// is cached.
 const DEFAULT_INTERCEPT_TIMEOUT_S: u64 = 5;
 
-/// Path to `~/.local/bin`. We use this for shim installation because
-/// it's the cross-shell, cross-platform convention that's typically
-/// on $PATH. We do NOT edit any shell RC file.
+/// Path to the dedicated shim dir (`~/.local/share/agent0waste/shims`).
+///
+/// v0.4.0 install model: shims live here, NOT in `~/.local/bin/`. The
+/// previous model wrote to `~/.local/bin/`, which is shared with cargo,
+/// uv, npm, pipx, and homebrew — every install/update in that space
+/// can clobber or be clobbered. This dir is dedicated to agent0waste
+/// shims; only this binary writes to it. The user adds it to PATH
+/// manually; we never edit shell RC files (per the v0.4.0 non-goal).
+///
+/// We follow the XDG `~/.local/share/<tool>/` convention used by uv
+/// and other Python tools, so the dir coexists with their install
+/// trees without conflict.
+fn shim_dir() -> Option<PathBuf> {
+    dirs::home_dir()
+        .map(|h| h.join(".local").join("share").join("agent0waste").join("shims"))
+}
+
+/// Path to `~/.local/bin`. Kept only to (a) detect legacy v0.4.0-alpha
+/// shims for migration, and (b) be stripped from PATH in
+/// `find_real_command` so legacy shims don't shadow the real binary
+/// during install-time resolution. New shims do NOT go here.
 fn local_bin() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".local").join("bin"))
 }
 
 fn shim_path(command: &str) -> Option<PathBuf> {
-    local_bin().map(|p| p.join(command))
+    shim_dir().map(|p| p.join(command))
 }
 
-/// Resolve the real `command` on PATH, excluding `~/.local/bin` (where
-/// the shim lives). Used at `intercept enable` time to record the
-/// real path in the install message; the shim does its own resolution
-/// at run time so it stays correct if the user changes their setup.
+/// True if `path` looks like a v0.4.0-alpha agent0waste shim. We
+/// detect by content (the install comment) rather than by path, so
+/// that user-authored scripts at `~/.local/bin/<cmd>` don't trigger
+/// false-positive "legacy shim" warnings.
+fn is_legacy_shim(path: &std::path::Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|s| s.contains("Installed by agent0waste intercept enable v0.4.0-alpha"))
+        .unwrap_or(false)
+}
+
+/// Resolve the real `command` on PATH, excluding the shim dir (where
+/// the new shim lives) AND `~/.local/bin` (where a legacy v0.4.0-alpha
+/// shim might still live). Used at `intercept enable` time to record
+/// the real path in the install message; the shim does its own
+/// resolution at run time so it stays correct if the user changes
+/// their setup.
+///
+/// Uses `type -p` (not `command -v`) to avoid the shell-builtin trap
+/// (e.g. `echo` on macOS is a builtin, and `command -v echo` returns
+/// the literal "echo" which would cause the shim to recurse into
+/// itself).
 fn find_real_command(command: &str) -> Option<String> {
-    let stripped = match local_bin() {
-        Some(p) => {
-            let p_str = p.to_string_lossy().to_string();
-            std::env::var("PATH").ok().map(|path| {
-                path.split(':')
-                    .filter(|d| *d != p_str)
-                    .collect::<Vec<_>>()
-                    .join(":")
-            })
-        }
-        None => std::env::var("PATH").ok(),
-    };
+    let excluded: Vec<String> = [shim_dir(), local_bin()]
+        .into_iter()
+        .flatten()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    let stripped = std::env::var("PATH").ok().map(|path| {
+        path.split(':')
+            .filter(|d| !excluded.iter().any(|e| e.as_str() == *d))
+            .collect::<Vec<_>>()
+            .join(":")
+    });
     stripped
         .as_deref()
         .and_then(|p| {
-            // Spawn `which` in a child process with the stripped PATH.
-            // This is what the shim does at run time; we replicate it
-            // here at install time so the user can see what was found.
             std::process::Command::new("bash")
                 .arg("-c")
-                .arg(format!("PATH='{}' command -v {}", p, command))
+                .arg(format!("PATH='{}' type -p {}", p, command))
                 .output()
                 .ok()
         })
@@ -593,6 +665,12 @@ enum InterceptAction {
     /// Remove the wrapper and shell alias (stub for v0.4.0).
     Disable {
         /// Command name to remove the shim for.
+        command: String,
+    },
+    /// Move a legacy v0.4.0-alpha shim from `~/.local/bin/<cmd>` to
+    /// the new shim dir.
+    Migrate {
+        /// Command name to migrate.
         command: String,
     },
     /// Show the rule table that `check` consults.
@@ -754,6 +832,9 @@ fn run_intercept(action: &InterceptAction) {
         InterceptAction::Disable { command } => {
             run_intercept_disable(command);
         }
+        InterceptAction::Migrate { command } => {
+            run_intercept_migrate(command);
+        }
         InterceptAction::Rules => {
             run_intercept_rules();
         }
@@ -843,6 +924,80 @@ fn run_intercept_status() {
             Action::Prompt => "prompt",
         };
         println!("  {:<20}  action={:<8}  cooldown_s={}", id, action, rule.cooldown_s);
+    }
+
+    // Shim install state — the actionable part of `status`.
+    println!();
+    let dir_display = shim_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "(no home directory)".to_string());
+    println!("shim dir      : {}", dir_display);
+    if let Some(dir) = shim_dir() {
+        let on_path = std::env::var("PATH")
+            .unwrap_or_default()
+            .split(':')
+            .any(|d| d == dir.to_string_lossy());
+        if dir.exists() {
+            println!("on PATH       : {}", if on_path { "yes" } else { "no" });
+            let mut shims: Vec<String> = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries
+                    .filter_map(|e| e.ok())
+                    .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            shims.sort();
+            if shims.is_empty() {
+                println!("shims installed: (none)");
+            } else {
+                println!("shims installed ({}):", shims.len());
+                for s in &shims {
+                    let real = find_real_command(s)
+                        .unwrap_or_else(|| "(not on PATH — shim will fail-open)".to_string());
+                    println!("  {:<16} → {}", s, real);
+                }
+            }
+            if !on_path {
+                println!();
+                println!("hint: add to PATH:  export PATH=\"$HOME/.local/share/agent0waste/shims:$PATH\"");
+            }
+        } else {
+            println!("on PATH       : n/a (dir does not exist yet)");
+            println!("shims installed: (none)");
+            println!();
+            println!("hint: install one:  agent0waste intercept enable <cmd>");
+        }
+    }
+
+    // Legacy shim detection — flag if a v0.4.0-alpha shim is still
+    // sitting in ~/.local/bin/ (will shadow the new shim on PATH
+    // even if the user adds the new dir, depending on PATH order).
+    if let Some(old_dir) = local_bin() {
+        if old_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&old_dir) {
+                let mut legacy: Vec<String> = entries
+                    .filter_map(|e| e.ok())
+                    .filter_map(|e| {
+                        let name = e.file_name().to_str()?.to_string();
+                        let path = e.path();
+                        if is_legacy_shim(&path) {
+                            Some(name)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                legacy.sort();
+                if !legacy.is_empty() {
+                    println!();
+                    println!("legacy shims in {}:", old_dir.display());
+                    for name in &legacy {
+                        println!("  {}", name);
+                    }
+                    println!("run `agent0waste intercept migrate <cmd>` for each to move them.");
+                }
+            }
+        }
     }
 }
 
@@ -969,13 +1124,41 @@ fn spawn_and_record(real_binary: &str, real_args: &[&str]) {
     }
 }
 
-/// Install a shim for `command` at `~/.local/bin/<command>`.
+/// Install a shim for `command` at `~/.local/share/agent0waste/shims/<command>`.
+///
+/// If a legacy v0.4.0-alpha shim is found at `~/.local/bin/<command>`,
+/// we refuse to enable until the user runs `intercept migrate <command>`
+/// (or manually removes the legacy shim). We don't auto-move it because
+/// the legacy shim might shadow the real binary, and moving it changes
+/// which `hermes` runs — better to make the user do it explicitly.
 fn run_intercept_enable(command: &str, _strict: bool) {
-    let Some(bin) = local_bin() else {
-        eprintln!("[agent0waste] no home directory; cannot determine ~/.local/bin");
+    let Some(dir) = shim_dir() else {
+        eprintln!("[agent0waste] no home directory; cannot determine shim dir");
         std::process::exit(70);
     };
-    let shim = bin.join(command);
+    let shim = dir.join(command);
+
+    // Migration guard: detect legacy v0.4.0-alpha shim at ~/.local/bin/<cmd>.
+    // Only flag files that look like our own shims (by content marker);
+    // user-authored scripts at the same path should not trigger this.
+    if let Some(old) = local_bin().map(|p| p.join(command)) {
+        if old.exists() && is_legacy_shim(&old) && !shim.exists() {
+            eprintln!(
+                "[agent0waste] found legacy shim at {}",
+                old.display()
+            );
+            eprintln!(
+                "[agent0waste] v0.4.0 install model uses {} instead",
+                dir.display()
+            );
+            eprintln!(
+                "[agent0waste] run `agent0waste intercept migrate {}` to move it,",
+                command
+            );
+            eprintln!("[agent0waste] or remove it manually:  rm {}", old.display());
+            std::process::exit(70);
+        }
+    }
 
     if shim.exists() {
         eprintln!(
@@ -986,9 +1169,9 @@ fn run_intercept_enable(command: &str, _strict: bool) {
         std::process::exit(70);
     }
 
-    // Create ~/.local/bin if missing.
-    if let Err(e) = std::fs::create_dir_all(&bin) {
-        eprintln!("[agent0waste] could not create {}: {}", bin.display(), e);
+    // Create the shim dir if missing.
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("[agent0waste] could not create {}: {}", dir.display(), e);
         std::process::exit(70);
     }
 
@@ -1037,20 +1220,75 @@ fn run_intercept_enable(command: &str, _strict: bool) {
     println!();
     println!("audit   : cat {}", shim.display());
     println!("disable : agent0waste intercept disable {}", command);
+    println!("migrate : agent0waste intercept migrate {}  (from legacy ~/.local/bin)", command);
     if std::env::var("PATH")
         .unwrap_or_default()
         .split(':')
-        .all(|d| d != bin.to_string_lossy())
+        .all(|d| d != dir.to_string_lossy())
     {
         println!();
-        println!("note: {} is not on your PATH", bin.display());
-        println!("add this to your shell rc:  export PATH=\"$HOME/.local/bin:$PATH\"");
+        println!("note: {} is not on your PATH", dir.display());
+        println!(
+            "add this to your shell rc:  export PATH=\"$HOME/.local/share/agent0waste/shims:$PATH\""
+        );
+        println!("(put it BEFORE other dirs if you also have hermes/claude installed elsewhere)");
     }
+}
+
+/// Move a legacy v0.4.0-alpha shim from `~/.local/bin/<cmd>` to
+/// `~/.local/share/agent0waste/shims/<cmd>`. Refuses if the legacy
+/// shim is missing, or if the new path already exists.
+fn run_intercept_migrate(command: &str) {
+    let Some(old) = local_bin().map(|p| p.join(command)) else {
+        eprintln!("[agent0waste] no home directory");
+        std::process::exit(70);
+    };
+    let Some(new) = shim_path(command) else {
+        std::process::exit(70);
+    };
+    if !old.exists() {
+        eprintln!("no legacy shim at {} — nothing to migrate", old.display());
+        return;
+    }
+    if new.exists() {
+        eprintln!(
+            "[agent0waste] target {} already exists; refusing to overwrite",
+            new.display()
+        );
+        eprintln!("remove it first:  rm {}", new.display());
+        std::process::exit(70);
+    }
+    if let Some(parent) = new.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("[agent0waste] could not create {}: {}", parent.display(), e);
+            std::process::exit(70);
+        }
+    }
+    if let Err(e) = std::fs::rename(&old, &new) {
+        eprintln!(
+            "[agent0waste] could not move {} → {}: {}",
+            old.display(),
+            new.display(),
+            e
+        );
+        std::process::exit(70);
+    }
+    // Re-apply +x in case the rename lost perms (it shouldn't, but cheap to verify).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755));
+    }
+    println!("moved {} → {}", old.display(), new.display());
+    println!();
+    println!("verify:");
+    println!("  which {}", command);
+    println!("  cat {}", new.display());
 }
 
 fn run_intercept_disable(command: &str) {
     let Some(shim) = shim_path(command) else {
-        eprintln!("[agent0waste] no home directory; cannot determine ~/.local/bin");
+        eprintln!("[agent0waste] no home directory");
         std::process::exit(70);
     };
     if !shim.exists() {

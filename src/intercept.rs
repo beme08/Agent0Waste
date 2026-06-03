@@ -594,9 +594,10 @@ mod tests {
     #[test]
     fn config_load_parses_overrides() {
         // Write a temp intercept.toml and verify the loader picks up
-        // user overrides.
+        // user overrides. Per-test filename to avoid collision with
+        // other tests that share `agent0waste-test-{pid}.toml`.
         let tmp = std::env::temp_dir().join(format!(
-            "agent0waste-test-{}.toml",
+            "agent0waste-test-config-{}.toml",
             std::process::id()
         ));
         std::fs::write(

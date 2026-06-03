@@ -48,7 +48,18 @@ cargo build --release
 # Show scan history
 ./target/release/agent0waste history
 
-# (clean is a no-op in v0.1 — Layer 2 ships in v0.2)
+# Layer 2: cost report from recorded + Hermes sessions
+./target/release/agent0waste cost --since 7
+
+# Layer 3: heuristic warnings
+./target/release/agent0waste cost --warnings
+
+# Layer 4: install a shim that consults heuristics before each call
+./target/release/agent0waste intercept enable hermes
+./target/release/agent0waste intercept status
+./target/release/agent0waste intercept disable hermes
+
+# (clean is a no-op — observation only, by design)
 ./target/release/agent0waste clean
 ```
 
@@ -58,6 +69,27 @@ Or install globally:
 cargo install --path .
 agent0waste scan
 ```
+
+### Layer 4 (interception)
+
+`agent0waste intercept enable <cmd>` installs a small bash shim in
+`~/.local/share/agent0waste/shims/<cmd>` (NOT `~/.local/bin/`, which
+is shared with cargo, uv, and homebrew). Add that dir to your PATH
+to make interception active:
+
+```bash
+export PATH="$HOME/.local/share/agent0waste/shims:$PATH"
+```
+
+The shim records the call (Layer 2), runs heuristics on recent Hermes
+sessions (Layer 3), and either `allow`s, `throttle`s, or `prompt`s
+based on the rule table. Fail-open by default — if Agent0Waste is
+unreachable, the call proceeds and a stderr message is logged.
+
+The shim is a real file you can `cat` and audit; nothing in your shell
+rc or `~/.hermes/config.yaml` is touched. `intercept disable <cmd>`
+removes the shim. `intercept migrate <cmd>` moves a legacy
+v0.4.0-alpha shim from `~/.local/bin/` to the new location.
 
 ## Example output
 
@@ -94,9 +126,9 @@ Machine: macOS * Mac16,7
 | Layer | Status | What it does |
 |-------|--------|--------------|
 | 1 -- Audit | shipped (v0.1) | Scan for config bloat, tool waste, memory pressure, model awareness |
-| 2 -- Accounting | designed (v0.2) | Per-tool / per-model / per-session token tracking + cost estimation |
-| 3 -- Optimization | planned | Iteration memory, context compression across runs |
-| 4 -- Interception | future | Optional real-time proxy for output filtering |
+| 2 -- Accounting | shipped (v0.2.1) | Per-tool / per-model / per-session token tracking + cost estimation from `state.db` |
+| 3 -- Heuristics | shipped (v0.3.1) | cache_bloat, prompt_growth, auto_routing, model_instability findings |
+| 4 -- Interception | in progress (v0.4.0-alpha) | Per-command shim that consults heuristics before each LLM call. Opt-in: `agent0waste intercept enable <cmd>`. macOS-only. |
 
 See [docs/roadmap.md](docs/roadmap.md) for details.
 
