@@ -144,6 +144,11 @@ override is now round-trippable.
 
 > "Block the call before it costs the token."
 
+> **Status:** shipped v0.4.0-beta on 2026-06-03. Design preserved; shim
+> install model uses `~/.local/share/agent0waste/shims/` (UV-style) to
+> avoid clobbering `~/.local/bin/<cmd>` (issue #1). Fail-closed and
+> local LLM proxy remain v0.4.1 work.
+
 - Optional opt-in: configure Hermes to consult Agent0Waste before
   every LLM call
 - Decision: allow, throttle (add a `<think>` cooling period), or

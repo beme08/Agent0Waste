@@ -4,7 +4,7 @@
 
 Shows exactly what is wasting RAM, disk space, and tokens on your machine -- with **zero data leaving your device**.
 
-> v0.1.0-alpha -- macOS only
+> v0.4.0-beta -- macOS only
 
 <p align="center">
   <img src="agent0waste-demo/renders/agent0waste-demo.gif" alt="Agent0Waste demo -- real scan of local Hermes profiles (505 KB, 30s)" width="720" />
@@ -128,7 +128,7 @@ Machine: macOS * Mac16,7
 | 1 -- Audit | shipped (v0.1) | Scan for config bloat, tool waste, memory pressure, model awareness |
 | 2 -- Accounting | shipped (v0.2.1) | Per-tool / per-model / per-session token tracking + cost estimation from `state.db` |
 | 3 -- Heuristics | shipped (v0.3.1) | cache_bloat, prompt_growth, auto_routing, model_instability findings |
-| 4 -- Interception | in progress (v0.4.0-alpha) | Per-command shim that consults heuristics before each LLM call. Opt-in: `agent0waste intercept enable <cmd>`. macOS-only. |
+| 4 -- Interception | shipped (v0.4.0-beta) | Per-command shim that consults heuristics before each LLM call. Opt-in: `agent0waste intercept enable <cmd>`. macOS-only. |
 
 See [docs/roadmap.md](docs/roadmap.md) for details.
 

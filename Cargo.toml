@@ -1,6 +1,6 @@
 [package]
 name = "agent0waste"
-version = "0.1.0"
+version = "0.4.0-beta"
 edition = "2021"
 authors = ["beme08"]
 description = "Local-first waste scanner for AI agent CLIs (Hermes, Claude Code, etc.)"
