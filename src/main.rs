@@ -1071,10 +1071,13 @@ fn cache_key_for(command: Option<&str>) -> Option<String> {
 //   [2] cache_lookup               — hit/miss/disable
 //   [3] heuristics                 — per-rule considered list
 //   [4] decision                   — final action + fired rule
-//   [5] cache_store                — written/skipped
+//   [5] cache_store                — ALWAYS skipped (trace is preview-only)
 //
-// Pure preview: does NOT exec the real binary. Useful for debugging
-// "why did the shim do X" without having to actually run X.
+// Pure preview: does NOT exec the real binary AND does NOT write to
+// the cache. Useful for debugging "why did the shim do X" without
+// having to actually run X and without warming the cache for the
+// next real check. Honors spec §3 conformance rule #1: cache is
+// latency-only, so a preview run cannot mutate cache state.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -1224,7 +1227,11 @@ fn run_intercept_trace(
     };
     let t_eval = t_eval_start.elapsed();
 
-    // [5] cache store
+    // [5] cache store — ALWAYS skipped for trace. Trace is a pure
+    // preview (spec §3 + conformance rule #1: cache is latency-only);
+    // a trace run must not warm the cache for a subsequent real check.
+    // The conditional skip reasons below are kept for documentation
+    // (what WOULD have happened in a real `intercept check`).
     let t_store_start = std::time::Instant::now();
     let cache_store = if no_cache {
         CacheStoreOutcome::Skipped { reason: "--no-cache".to_string() }
@@ -1235,15 +1242,8 @@ fn run_intercept_trace(
     } else if cache_hit {
         CacheStoreOutcome::Skipped { reason: "cache hit (already stored)".to_string() }
     } else {
-        let path = state_db_path.as_deref().unwrap();
-        let mtime = state_db_mtime(path).unwrap();
-        let key = cache_key.as_deref().unwrap();
-        let mut c = cache::HeuristicCache::load();
-        c.put(key, mtime, Duration::from_secs(30), decision.to_json());
-        match c.save() {
-            Ok(()) => CacheStoreOutcome::Written { ttl_s: 30 },
-            Err(e) => CacheStoreOutcome::Skipped { reason: format!("save failed: {}", e) },
-        }
+        // The would-be-write path. Always skipped for trace.
+        CacheStoreOutcome::Skipped { reason: "trace is preview-only".to_string() }
     };
     let t_store = t_store_start.elapsed();
 
