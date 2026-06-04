@@ -500,10 +500,16 @@ find_real() {
 REAL="$(find_real)"
 TIMEOUT="${AGENT0WASTE_INTERCEPT_TIMEOUT:-__TIMEOUT__}"
 
+# Save our stdin on fd 3 before backgrounding. Bash closes stdin in
+# backgrounded children (`cmd &`) when the parent's stdin is a non-TTY
+# (file/pipe), which breaks the prompt path — the child sees EOF and
+# cancels. Redirecting the child to fd 3 keeps stdin alive for it.
+exec 3<&0
+
 # Run intercept run in the background with a hard timeout. If the
 # timeout fires, log a stderr message and exec the real command
 # directly (fail-open: the guardrail is bypassed, the user is told).
-"__AGENT0WASTE_PATH__" intercept run -- "$REAL" "$@" &
+"__AGENT0WASTE_PATH__" intercept run -- "$REAL" "$@" <&3 &
 child_pid=$!
 (
     sleep "$TIMEOUT" 2>/dev/null || true
@@ -523,9 +529,20 @@ rc=$?
 kill "$timer_pid" 2>/dev/null || true
 wait "$timer_pid" 2>/dev/null || true
 
-# If the child was killed by the timer (rc 143 = SIGTERM, 137 = SIGKILL,
-# 124 = GNU timeout), fall through to running the real command.
-if [ "$rc" = "143" ] || [ "$rc" = "137" ] || [ "$rc" = "124" ]; then
+# Close our saved stdin copy.
+exec 3<&-
+
+# Fail-open: if `intercept run` didn't handle the call itself, fall
+# through to running the real binary. intercept run's behavior:
+#   - rc=0: it already ran the real binary (allow / throttle re-check
+#     that allowed / prompt accepted / fail-open that ran). Don't
+#     double-execute.
+#   - rc=1: prompt_user saw the user answer N and printed "cancelled".
+#     The user explicitly said don't run; respect that.
+#   - rc=other: something went wrong (our 5s timeout killing the
+#     check, intercept run crashing, binary missing, etc.). Fail-open:
+#     run the real binary here in the shim.
+if [ "$rc" != "0" ] && [ "$rc" != "1" ]; then
     exec "$REAL" "$@"
 fi
 
@@ -844,20 +861,19 @@ fn run_intercept(action: &InterceptAction) {
             // so $0 is "intercept run" and the first argv after `--`
             // is the real binary path.
             let argv: Vec<String> = std::env::args().collect();
-            let (_cmd, args) = run::split_run_args(&argv)
+            let (real_binary, args) = run::split_run_args(&argv)
                 .unwrap_or_else(|e| {
                     eprintln!("error: {}", e);
                     eprintln!();
                     eprintln!("usage:  agent0waste intercept run -- <real-binary> [args...]");
                     std::process::exit(run::EXIT_BAD_ARGS);
                 });
-            if args.is_empty() {
+            if real_binary.is_empty() {
                 eprintln!("error: missing <real-binary> after `--`");
                 std::process::exit(run::EXIT_BAD_ARGS);
             }
-            let real_binary = &args[0];
-            let real_args: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
-            run_intercept_run(real_binary, &real_args);
+            let real_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            run_intercept_run(&real_binary, &real_args);
         }
     }
 }

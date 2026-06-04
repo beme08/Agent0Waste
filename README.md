@@ -91,6 +91,14 @@ rc or `~/.hermes/config.yaml` is touched. `intercept disable <cmd>`
 removes the shim. `intercept migrate <cmd>` moves a legacy
 v0.4.0-alpha shim from `~/.local/bin/` to the new location.
 
+<p align="center">
+  <img src="agent0waste-demo/renders/agent0waste-intercept-demo.gif" alt="Agent0Waste interception demo — allow, prompt (Y/N), throttle paths + real hermes --version" width="720" />
+</p>
+
+<p align="center">
+  <em>Real run of <code>scripts/v040-demo.sh</code> on the developer's machine. <a href="docs/validation.md#v040-beta--interception-validated-2026-06-03">See the validation record</a> for the full checklist + verbatim output.</em>
+</p>
+
 ## Example output
 
 ```
