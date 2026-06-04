@@ -369,6 +369,19 @@ Six scenarios exercised on `v0.4.2-stabilization` branch
 | 5 | No `--command` | no `--command` arg | `[2] SKIPPED (no --command)`, `[5] cache store skipped (no command key)` | yes |
 | 6 | All-allow config | `[rules.cache_bloat] action=allow` etc. | `[3]` shows all 4 → allow, `[4] decision allow` | yes |
 
+**Read-only contract (af78d83)**: trace is a pure preview and MUST
+NOT mutate the cache. Verified by clearing the cache file, running
+two consecutive `intercept trace` calls with the same command, and
+confirming:
+- Both calls show `[2] cache MISS (no entry or stale)`
+- Both calls show `[5] cache store   skipped (trace is preview-only)`
+- The cache file does not exist on disk after the calls
+- Heuristics are re-evaluated each call (no stale cached decision)
+
+This honors the spec §3 conformance rule #1 (cache is
+latency-only) and prevents the subtle bug where a trace run
+warms the cache for the next real `intercept check`.
+
 **Output format** matches the spec §3 (5-step pipeline) and
 the user's example from the design conversation. Step numbers
 in `[N]` are directly cross-referenceable to
