@@ -90,6 +90,7 @@ invariant is validated by the 3x back-to-back check (cold, warm,
 | `Allow` | `{"decision":"allow"}` | 0 | exec real binary immediately |
 | `Prompt` | `{"decision":"prompt","reason":"…","hint":"…"}` | 65 | prompt user y/N, exec on Y, exit 1 on N |
 | `Throttle` | `{"decision":"throttle","cooldown_s":N,"reason":"…","hint":"…"}` | 64 | announce, sleep `cooldown_s`, re-check, exec anyway |
+| `Deny` | `{"decision":"deny","reason":"…","hint":"…"}` | 66 | print reason, **do not exec** the real binary |
 | error | (no JSON; stderr message) | any other | **fail-open**: exec real binary |
 
 The re-check after a throttle sleep exists only to give the
@@ -97,16 +98,29 @@ heuristic a chance to update. The shim runs the real binary
 **regardless** of the re-check outcome. The throttle is a guardrail
 (not a gate): the goal is to slow the user down, not to block them.
 
+`Deny` is the policy-layer termination. Unlike throttle and
+prompt, the shim does **not** exec the real binary. Users can
+override per-call with `--agent0waste-bypass` on the shim;
+that bypass is audit-logged to `~/.local/share/agent0waste/bypass.log`.
+
 ## 6. Modes
 
-| Mode | Behavior on error | Status |
-|------|-------------------|--------|
-| `fail-open` (default) | any error → `Allow` | shipped (v0.4.1) |
-| `strict` | any error → deny (no real binary exec) | **NOT SHIPPED**; spec only, target v0.5.0 |
+| Mode | Default decision (no rule fired) | Status |
+|------|----------------------------------|--------|
+| `fail-open` (default) | `Allow` | shipped (v0.4.1) |
+| `fail-closed` | `Deny` (exit 66) | target v0.5.0, design in `docs/v0.5.0-design.md` |
+
+**Mode only flips §5, never §7.** Heuristic timeouts and other
+runtime errors (the §7 failure table) stay fail-open regardless
+of mode. A timeout is a system failure, not a policy outcome;
+denying on timeout would undermine trust in fail-closed exactly
+when reliability matters most (slow disk, cold cache, high load).
+This is a first-class decision documented for future maintainers:
+any new §7 row follows the same rule.
 
 The `mode` field in config is a single switch. Per-command
 overrides are out of scope (would be a separate `[[overrides]]`
-table). Strict mode is opt-in and team-oriented.
+table). Fail-closed mode is opt-in and team-oriented.
 
 ## 7. Failure modes
 
@@ -157,10 +171,12 @@ specs when implemented:
 - **sandbox-exec** (v0.4.3, issue #5) — wraps the real binary in
   `sandbox-exec` for hard isolation. Decision spec is unchanged;
   sandbox-exec is an *execution wrapper*, not a decision layer.
-- **strict mode** (v0.5.0, issue #4) — flips all `fail-open` rows
-  in §7 to `deny`. Adds a `Decision::Deny` variant. The shim
-  would need a new exit code (e.g., 66) and a new path that does
-  NOT exec the real binary on deny.
+- **strict mode** (v0.5.0, issue #4) — opt-in `mode = "fail-closed"`
+  flips the §5 default (no rule fired) from `Allow` to `Deny`.
+  Adds a `Decision::Deny` variant (exit code 66) and a shim path
+  that does NOT exec the real binary. Per the §5-vs-§7 rule,
+  runtime errors stay fail-open even in fail-closed mode.
+  Design in `docs/v0.5.0-design.md`.
 - **local LLM proxy** (v0.6.0, issue #6) — intercepts at the LLM
   call level, not the CLI level. Different inputs, different
   decision layer. Will reuse the cache design.
