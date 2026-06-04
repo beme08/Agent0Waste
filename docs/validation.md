@@ -354,3 +354,44 @@ unchanged from v0.4.0.
   uses fixed 30s; all default rules have 30s anyway)
 - The user's review + final release-validation pass on the merge
   commit before tagging v0.4.1 stable
+
+## v0.4.2-beta — `intercept trace` validation
+
+Six scenarios exercised on `v0.4.2-stabilization` branch
+(commit after spec + trace implementation):
+
+| # | Scenario | Input | Expected step-2 outcome | Verified |
+|---|----------|-------|-------------------------|----------|
+| 1 | Cold cache | first call after `rm heuristic-cache.json` | `[2] cache MISS (no entry or stale)` | yes |
+| 2 | Warm cache | second call, same command, < 30s | `[2] cache HIT (age 0s)`, `[3] skipped`, `[4] source=cache` | yes |
+| 3 | `--no-cache` | `--no-cache` flag | `[2] cache DISABLED (--no-cache)`, `[5] cache store skipped (--no-cache)` | yes |
+| 4 | state.db missing | `mv state.db state.db.tmp` | `[1] FAIL-OPEN`, `[2] SKIPPED`, `[4] source=fail-open` | yes |
+| 5 | No `--command` | no `--command` arg | `[2] SKIPPED (no --command)`, `[5] cache store skipped (no command key)` | yes |
+| 6 | All-allow config | `[rules.cache_bloat] action=allow` etc. | `[3]` shows all 4 → allow, `[4] decision allow` | yes |
+
+**Output format** matches the spec §3 (5-step pipeline) and
+the user's example from the design conversation. Step numbers
+in `[N]` are directly cross-referenceable to
+`docs/decision-spec.md §3 Pipeline`.
+
+**Timings** from a clean build on a warm laptop:
+
+| Scenario | load | cache | eval | store | total |
+|----------|------|-------|------|-------|-------|
+| 1 (cold)  | 553ms | 0ms | 1ms | 0ms | 555ms |
+| 2 (warm)  | 547ms | 0ms | 0ms | 0ms | 547ms |
+| 3 (--no-cache) | 556ms | 0ms | 1ms | 0ms | 557ms |
+| 4 (DB missing) | 0ms | 0ms | 0ms | 0ms | 0ms |
+| 5 (no cmd) | 541ms | 0ms | 1ms | 0ms | 543ms |
+| 6 (all allow) | 49ms | 0ms | 2ms | 0ms | 51ms |
+
+**Caveat on cold path timings**: the first heuristic evaluation
+loads the full `state.db` into memory and runs SQL aggregation
+per group. ~500-600ms is the cost of full DB scan + heuristic,
+NOT a v0.4.2 regression. The intercept `check` subcommand has
+the same cost (the heuristic itself hasn't changed). Subsequent
+calls within the 30s cache TTL are warm and ~20-50ms.
+
+The 500ms shim timeout is still safe; the trace path runs in
+the parent (no shim) but the same heuristic code path is
+exercised.

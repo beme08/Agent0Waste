@@ -352,39 +352,149 @@ pub fn check(
     hint: &CheckHint,
 ) -> Decision {
     let report = heuristics::run_all(sessions, since);
-    pick_decision(&report, config, hint)
+    pick_decision(&report, config, hint).decision
 }
 
-fn pick_decision(report: &Report, config: &InterceptConfig, hint: &CheckHint) -> Decision {
-    // Sort findings by severity desc. Stable sort preserves specificity
-    // (cache_bloat before prompt_growth when both are high).
-    let mut sorted: Vec<_> = report.findings.iter().collect();
-    sorted.sort_by(|a, b| severity_rank(b.severity).cmp(&severity_rank(a.severity)));
+/// Like `check` but also returns which rule fired and a per-rule
+/// "considered" list (all configured rules, not just ones whose
+/// heuristic fired). Used by `intercept trace` to render the
+/// decision pipeline (spec §3). v0.4.2.
+pub fn check_with_trace(
+    sessions: &[HermesSession],
+    since: DateTime<Utc>,
+    config: &InterceptConfig,
+    hint: &CheckHint,
+) -> CheckTrace {
+    let report = heuristics::run_all(sessions, since);
+    pick_decision_with_trace(&report, config, hint)
+}
 
-    for finding in sorted {
-        let rule = config.rules.get(finding.id);
-        let action = rule.map(|r| r.action).unwrap_or_else(|| default_action(finding.id, finding.severity));
-        let cooldown = rule.map(|r| r.cooldown_s).unwrap_or(30);
+#[derive(Debug, Clone)]
+pub struct ConsideredRule {
+    pub rule_id: String,
+    pub action: Action,
+    pub detail: String,
+    pub fired: bool,
+}
 
-        if action == Action::Allow {
-            continue;
+#[derive(Debug, Clone)]
+pub struct CheckTrace {
+    pub decision: Decision,
+    pub fired_rule: Option<String>,
+    pub considered: Vec<ConsideredRule>,
+}
+
+/// Default rule ordering for trace output. Matches the order in
+/// `InterceptConfig::defaults()` and `docs/decision-spec.md` §8
+/// (cache_bloat → prompt_growth → auto_routing → model_instability).
+/// Any custom rules from the user's config are appended alphabetically.
+const DEFAULT_RULE_ORDER: &[&str] = &[
+    "cache_bloat",
+    "prompt_growth",
+    "auto_routing",
+    "model_instability",
+];
+
+fn pick_decision(report: &Report, config: &InterceptConfig, hint: &CheckHint) -> CheckTrace {
+    pick_decision_with_trace(report, config, hint)
+}
+
+fn pick_decision_with_trace(
+    report: &Report,
+    config: &InterceptConfig,
+    hint: &CheckHint,
+) -> CheckTrace {
+    // Build the considered list by iterating all configured rules
+    // (or the 4 defaults if the user has no config). For each rule,
+    // check if there's a finding; if so, the rule's action is its
+    // contribution; if not, the rule's contribution is "allow" (no
+    // trigger means no enforcement).
+    let mut ordered_rules: Vec<String> = Vec::new();
+    for id in DEFAULT_RULE_ORDER {
+        if config.rules.contains_key(*id) {
+            ordered_rules.push((*id).to_string());
         }
+    }
+    // Append any custom rules (alphabetical for stability).
+    let mut custom: Vec<String> = config
+        .rules
+        .keys()
+        .filter(|k| !DEFAULT_RULE_ORDER.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    custom.sort();
+    ordered_rules.extend(custom);
 
-        let reason = format_decision_reason(finding, hint);
-        let hint_text = finding.hint.clone();
+    let mut considered: Vec<ConsideredRule> = Vec::new();
+    let mut fired: Option<String> = None;
+    let mut final_decision: Option<Decision> = None;
 
-        return match action {
-            Action::Throttle => Decision::Throttle {
-                cooldown_s: cooldown,
-                reason,
-                hint: hint_text,
-            },
-            Action::Prompt => Decision::Prompt { reason, hint: hint_text },
-            Action::Allow => unreachable!(),
+    for rule_id in &ordered_rules {
+        let rule_cfg = config.rules.get(rule_id);
+        // Pick the highest-severity finding for this rule (if any).
+        let finding = report
+            .findings
+            .iter()
+            .filter(|f| f.id == rule_id)
+            .max_by_key(|f| severity_rank(f.severity));
+
+        let (action, detail) = match (finding, rule_cfg) {
+            (Some(f), Some(_)) => {
+                // Rule fired; action comes from the config.
+                let action = rule_cfg.map(|r| r.action).unwrap();
+                let cooldown = rule_cfg.map(|r| r.cooldown_s).unwrap_or(30);
+                let detail = if matches!(action, Action::Throttle) {
+                    format!("{} (cooldown {}s)", f.message, cooldown)
+                } else {
+                    f.message.clone()
+                };
+                (action, detail)
+            }
+            (Some(f), None) => {
+                // Finding but no config: use default_action.
+                let action = default_action(f.id, f.severity);
+                (action, f.message.clone())
+            }
+            (None, _) => {
+                // No finding: no contribution.
+                (Action::Allow, String::new())
+            }
         };
+
+        let did_fire = fired.is_none() && action != Action::Allow;
+
+        considered.push(ConsideredRule {
+            rule_id: rule_id.clone(),
+            action,
+            detail,
+            fired: did_fire,
+        });
+
+        if did_fire {
+            // Build the decision from the finding (which is what `fired` was based on)
+            if let Some(f) = finding {
+                let cooldown = rule_cfg.map(|r| r.cooldown_s).unwrap_or(30);
+                let reason = format_decision_reason(f, hint);
+                let hint_text = f.hint.clone();
+                final_decision = Some(match action {
+                    Action::Throttle => Decision::Throttle {
+                        cooldown_s: cooldown,
+                        reason,
+                        hint: hint_text,
+                    },
+                    Action::Prompt => Decision::Prompt { reason, hint: hint_text },
+                    Action::Allow => unreachable!(),
+                });
+            }
+            fired = Some(rule_id.clone());
+        }
     }
 
-    Decision::Allow
+    CheckTrace {
+        decision: final_decision.unwrap_or(Decision::Allow),
+        fired_rule: fired,
+        considered,
+    }
 }
 
 fn severity_rank(s: Severity) -> u8 {
@@ -851,5 +961,55 @@ cooldown_s = 10
             "got: {:?}",
             outcome
         );
+    }
+
+    // --- Trace tests (v0.4.2) ---
+
+    #[test]
+    fn check_with_trace_lists_all_default_rules() {
+        // With no findings, every default rule should still appear in
+        // the considered list, with action=Allow (no contribution).
+        let sessions: Vec<HermesSession> = vec![];
+        let config = InterceptConfig::defaults();
+        let hint = CheckHint::default();
+        let trace = check_with_trace(&sessions, Utc::now(), &config, &hint);
+        assert_eq!(trace.decision, Decision::Allow);
+        assert!(trace.fired_rule.is_none());
+        assert_eq!(trace.considered.len(), 4);
+        let ids: Vec<&str> = trace.considered.iter().map(|c| c.rule_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["cache_bloat", "prompt_growth", "auto_routing", "model_instability"]
+        );
+        for c in &trace.considered {
+            assert_eq!(c.action, Action::Allow);
+            assert!(!c.fired);
+        }
+    }
+
+    #[test]
+    fn check_with_trace_marks_fired_rule() {
+        // A session group with high cache_read/input ratio triggers
+        // cache_bloat. The heuristic requires >=3 sessions in the
+        // (model, source) group, so add three of them.
+        let sessions = vec![
+            hs("x", "cli", "2026-06-02T00:00:00Z", 1000, 500, 20000),
+            hs("x", "cli", "2026-06-03T00:00:00Z", 1000, 500, 20000),
+            hs("x", "cli", "2026-06-04T00:00:00Z", 1000, 500, 20000),
+        ];
+        let config = InterceptConfig::defaults();
+        let hint = CheckHint::default();
+        let since = DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z").unwrap().with_timezone(&Utc);
+        let trace = check_with_trace(&sessions, since, &config, &hint);
+        assert_eq!(trace.fired_rule, Some("cache_bloat".to_string()));
+        let cache_bloat = trace.considered.iter().find(|c| c.rule_id == "cache_bloat").unwrap();
+        assert_eq!(cache_bloat.action, Action::Throttle);
+        assert!(cache_bloat.fired);
+        for other in &trace.considered {
+            if other.rule_id != "cache_bloat" {
+                assert_eq!(other.action, Action::Allow);
+                assert!(!other.fired);
+            }
+        }
     }
 }

@@ -55,6 +55,7 @@ const CACHE_FILENAME: &str = "heuristic-cache.json";
 struct CacheEntry {
     state_db_mtime_unix: i64,
     expires_at_unix: i64,
+    created_at_unix: i64,
     decision_json: String,
 }
 
@@ -103,6 +104,15 @@ impl HeuristicCache {
         Some(&entry.decision_json)
     }
 
+    /// Age (in seconds) of a cached entry, or `None` if the entry
+    /// doesn't exist. Used by `intercept trace` to render "HIT
+    /// (age Ns)" in the trace output. v0.4.2.
+    pub fn get_age_s(&self, command: &str, now_unix: i64) -> Option<u64> {
+        let entry = self.file.entries.get(command)?;
+        let age = now_unix.saturating_sub(entry.created_at_unix);
+        Some(age.max(0) as u64)
+    }
+
     /// Store a decision. `ttl == 0` is a no-op (rule opted out).
     pub fn put(
         &mut self,
@@ -118,6 +128,7 @@ impl HeuristicCache {
         let entry = CacheEntry {
             state_db_mtime_unix: mtime_to_unix(state_db_mtime),
             expires_at_unix: now.saturating_add(ttl.as_secs() as i64),
+            created_at_unix: now,
             decision_json,
         };
         self.file.entries.insert(command.to_string(), entry);
@@ -203,6 +214,7 @@ mod tests {
             CacheEntry {
                 state_db_mtime_unix: 1000,
                 expires_at_unix: 0,
+                created_at_unix: 0,
                 decision_json: r#"{"decision":"allow"}"#.into(),
             },
         );
@@ -355,5 +367,38 @@ mod tests {
         assert!(cache.get("hermes run", mtime(1000)).is_none());
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn get_age_s_returns_seconds_since_put() {
+        // v0.4.2: used by intercept trace to render "HIT (age Ns)".
+        let mut cache = HeuristicCache {
+            file: CacheFile::default(),
+            path: PathBuf::from("/dev/null"),
+        };
+        let now = unix_now();
+        // Entry put 5s ago, valid for 30s.
+        let mut entry = CacheEntry {
+            state_db_mtime_unix: 1000,
+            expires_at_unix: now + 30,
+            created_at_unix: now - 5,
+            decision_json: "{}".into(),
+        };
+        cache.file.entries.insert("hermes run".into(), entry.clone());
+        let age = cache.get_age_s("hermes run", now).unwrap();
+        assert_eq!(age, 5);
+
+        // Entry put 25s ago, expired (TTL 30s).
+        entry.expires_at_unix = now - 5;  // expired
+        entry.created_at_unix = now - 25;
+        cache.file.entries.insert("hermes run".into(), entry);
+        // Even though the entry is expired, get_age_s doesn't check TTL;
+        // it just returns the age. (The trace uses get() for the actual
+        // hit/miss decision.)
+        let age = cache.get_age_s("hermes run", now).unwrap();
+        assert_eq!(age, 25);
+
+        // Non-existent entry.
+        assert!(cache.get_age_s("nonexistent", now).is_none());
     }
 }
