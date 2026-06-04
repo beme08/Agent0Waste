@@ -135,6 +135,32 @@ impl Decision {
             }
         }
     }
+
+    /// Inverse of `to_json`. Used by the heuristic cache to deserialize
+    /// a previously-stored decision. Returns `None` on malformed JSON
+    /// (treated as cache miss, not an error).
+    pub fn from_json(s: &str) -> Option<Self> {
+        // Minimal hand-rolled parser: we only need the `decision` field
+        // to dispatch, and the well-known fields per variant. Avoids a
+        // serde dep on the hot path.
+        let v: serde_json::Value = serde_json::from_str(s).ok()?;
+        let decision = v.get("decision")?.as_str()?;
+        match decision {
+            "allow" => Some(Decision::Allow),
+            "throttle" => {
+                let cooldown_s = v.get("cooldown_s")?.as_u64()?;
+                let reason = v.get("reason")?.as_str()?.to_string();
+                let hint = v.get("hint").and_then(|h| h.as_str()).map(String::from);
+                Some(Decision::Throttle { cooldown_s, reason, hint })
+            }
+            "prompt" => {
+                let reason = v.get("reason")?.as_str()?.to_string();
+                let hint = v.get("hint").and_then(|h| h.as_str()).map(String::from);
+                Some(Decision::Prompt { reason, hint })
+            }
+            _ => None,
+        }
+    }
 }
 
 fn json_str(s: &str) -> String {
@@ -198,13 +224,18 @@ impl Mode {
 pub struct RuleConfig {
     pub action: Action,
     pub cooldown_s: u64,
+    /// Heuristic cache TTL for this rule, in seconds. Default 30s.
+    /// Set to 0 to disable caching (always re-run heuristics).
+    /// See src/cache.rs for the cache semantics.
+    pub cache_ttl_s: u64,
 }
 
 impl RuleConfig {
     fn from_toml(table: &toml::Table) -> Option<Self> {
         let action = table.get("action").and_then(|v| v.as_str()).and_then(Action::from_str)?;
         let cooldown_s = table.get("cooldown_s").and_then(|v| v.as_integer()).map(|i| i.max(0) as u64).unwrap_or(30);
-        Some(Self { action, cooldown_s })
+        let cache_ttl_s = table.get("cache_ttl_s").and_then(|v| v.as_integer()).map(|i| i.max(0) as u64).unwrap_or(30);
+        Some(Self { action, cooldown_s, cache_ttl_s })
     }
 }
 
@@ -222,11 +253,11 @@ impl InterceptConfig {
         let mut rules = HashMap::new();
         rules.insert(
             "cache_bloat".into(),
-            RuleConfig { action: Action::Throttle, cooldown_s: 30 },
+            RuleConfig { action: Action::Throttle, cooldown_s: 30, cache_ttl_s: 30 },
         );
         rules.insert(
             "prompt_growth".into(),
-            RuleConfig { action: Action::Throttle, cooldown_s: 60 },
+            RuleConfig { action: Action::Throttle, cooldown_s: 60, cache_ttl_s: 30 },
         );
         // H3 auto_routing and H4 model_instability are info-only by
         // design. See docs/v0.4-design.md "Why are H3 and H4 'allow'
@@ -235,11 +266,11 @@ impl InterceptConfig {
         // paternalistic about the user A/B testing or using auto-routing."
         rules.insert(
             "auto_routing".into(),
-            RuleConfig { action: Action::Allow, cooldown_s: 0 },
+            RuleConfig { action: Action::Allow, cooldown_s: 0, cache_ttl_s: 30 },
         );
         rules.insert(
             "model_instability".into(),
-            RuleConfig { action: Action::Allow, cooldown_s: 0 },
+            RuleConfig { action: Action::Allow, cooldown_s: 0, cache_ttl_s: 30 },
         );
         Self {
             mode: Mode::FailOpen,
@@ -445,7 +476,55 @@ mod tests {
             hint: None,
         };
         let j = d.to_json();
-        assert!(j.contains(r#""He said \"hi\"""#), "got: {}", j);
+        // The escaped form in JSON is \"hi\"; we expect to see that in the output.
+        assert!(j.contains(r#"\"hi\""#), "got: {}", j);
+    }
+
+    #[test]
+    fn decision_from_json_allow_roundtrip() {
+        let d = Decision::Allow;
+        assert_eq!(Decision::from_json(&d.to_json()), Some(Decision::Allow));
+    }
+
+    #[test]
+    fn decision_from_json_throttle_roundtrip() {
+        let d = Decision::Throttle {
+            cooldown_s: 30,
+            reason: "cache_bloat fired".into(),
+            hint: Some("trim context".into()),
+        };
+        let parsed = Decision::from_json(&d.to_json()).unwrap();
+        match parsed {
+            Decision::Throttle { cooldown_s, reason, hint } => {
+                assert_eq!(cooldown_s, 30);
+                assert_eq!(reason, "cache_bloat fired");
+                assert_eq!(hint, Some("trim context".into()));
+            }
+            _ => panic!("expected Throttle, got {:?}", parsed),
+        }
+    }
+
+    #[test]
+    fn decision_from_json_prompt_roundtrip() {
+        let d = Decision::Prompt {
+            reason: "r".into(),
+            hint: None,
+        };
+        match Decision::from_json(&d.to_json()).unwrap() {
+            Decision::Prompt { reason, hint } => {
+                assert_eq!(reason, "r");
+                assert_eq!(hint, None);
+            }
+            _ => panic!("expected Prompt"),
+        }
+    }
+
+    #[test]
+    fn decision_from_json_malformed_returns_none() {
+        assert_eq!(Decision::from_json("not json"), None);
+        let unknown_decision = r#"{"decision":"unknown"}"#;
+        assert_eq!(Decision::from_json(unknown_decision), None);
+        assert_eq!(Decision::from_json("{}"), None);
     }
 
     // --- check() tests ---
@@ -491,7 +570,7 @@ mod tests {
         let mut cfg = InterceptConfig::defaults();
         cfg.rules.insert(
             "cache_bloat".into(),
-            RuleConfig { action: Action::Prompt, cooldown_s: 0 },
+            RuleConfig { action: Action::Prompt, cooldown_s: 0, cache_ttl_s: 30 },
         );
         let d = check(&s, since, &cfg, &CheckHint::default());
         assert!(matches!(d, Decision::Prompt { .. }), "got: {:?}", d);
@@ -508,7 +587,7 @@ mod tests {
         let mut cfg = InterceptConfig::defaults();
         cfg.rules.insert(
             "cache_bloat".into(),
-            RuleConfig { action: Action::Allow, cooldown_s: 0 },
+            RuleConfig { action: Action::Allow, cooldown_s: 0, cache_ttl_s: 30 },
         );
         let d = check(&s, since, &cfg, &CheckHint::default());
         assert_eq!(d, Decision::Allow);
