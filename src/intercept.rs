@@ -93,15 +93,25 @@ pub enum Decision {
         reason: String,
         hint: Option<String>,
     },
+    /// Print a message to stderr, do NOT exec the real binary. Exit 66.
+    /// v0.5.0: only emitted when mode = "fail-closed" and no rule
+    /// fired (or a user-configured rule has action = deny). The shim
+    /// must NOT call the real binary on this path. Users can override
+    /// per-call with `--agent0waste-bypass` (audit-logged).
+    Deny {
+        reason: String,
+        hint: Option<String>,
+    },
 }
 
 impl Decision {
-    /// Exit code for the wrapper. 0=allow, 64=throttle, 65=prompt.
+    /// Exit code for the wrapper. 0=allow, 64=throttle, 65=prompt, 66=deny.
     pub fn exit_code(&self) -> i32 {
         match self {
             Decision::Allow => 0,
             Decision::Throttle { .. } => 64,
             Decision::Prompt { .. } => 65,
+            Decision::Deny { .. } => 66,
         }
     }
 
@@ -133,6 +143,17 @@ impl Decision {
                     hint
                 )
             }
+            Decision::Deny { reason, hint } => {
+                let hint = hint
+                    .as_ref()
+                    .map(|h| format!(r#","hint":{}"#, json_str(h)))
+                    .unwrap_or_default();
+                format!(
+                    r#"{{"decision":"deny","reason":{}{}}}"#,
+                    json_str(reason),
+                    hint
+                )
+            }
         }
     }
 
@@ -157,6 +178,11 @@ impl Decision {
                 let reason = v.get("reason")?.as_str()?.to_string();
                 let hint = v.get("hint").and_then(|h| h.as_str()).map(String::from);
                 Some(Decision::Prompt { reason, hint })
+            }
+            "deny" => {
+                let reason = v.get("reason")?.as_str()?.to_string();
+                let hint = v.get("hint").and_then(|h| h.as_str()).map(String::from);
+                Some(Decision::Deny { reason, hint })
             }
             _ => None,
         }
@@ -188,6 +214,11 @@ pub enum Action {
     Allow,
     Throttle,
     Prompt,
+    /// v0.5.0: opt-in deny action. When a rule is configured with
+    /// action=deny, the shim exits 66 without exec'ing the real
+    /// binary. Distinct from "no rule fired + mode=fail-closed"
+    /// (which is a default-deny, not a rule-driven deny).
+    Deny,
 }
 
 impl Action {
@@ -196,6 +227,7 @@ impl Action {
             "allow" => Some(Action::Allow),
             "throttle" => Some(Action::Throttle),
             "prompt" => Some(Action::Prompt),
+            "deny" => Some(Action::Deny),
             _ => None,
         }
     }
@@ -483,6 +515,7 @@ fn pick_decision_with_trace(
                         hint: hint_text,
                     },
                     Action::Prompt => Decision::Prompt { reason, hint: hint_text },
+                    Action::Deny => Decision::Deny { reason, hint: hint_text },
                     Action::Allow => unreachable!(),
                 });
             }
@@ -490,8 +523,26 @@ fn pick_decision_with_trace(
         }
     }
 
+    // v0.5.0 mode-flip: if no rule fired and mode=fail-closed,
+    // default to Deny. See decision-spec §6 and v0.5.0-design.md.
+    // This only flips §5 (decision table) defaults; §7 (failure
+    // table) outcomes remain unchanged. Heuristic timeouts still
+    // fail-open regardless of mode.
+    let decision = match final_decision {
+        Some(d) => d,
+        None if config.mode == Mode::FailClosed => Decision::Deny {
+            reason: "no heuristic fired; mode=fail-closed denies by default".to_string(),
+            hint: Some(
+                "pass --agent0waste-bypass to override (audit-logged), \
+                 or switch to mode=fail-open"
+                    .to_string(),
+            ),
+        },
+        None => Decision::Allow,
+    };
+
     CheckTrace {
-        decision: final_decision.unwrap_or(Decision::Allow),
+        decision,
         fired_rule: fired,
         considered,
     }
@@ -1011,5 +1062,113 @@ cooldown_s = 10
                 assert!(!other.fired);
             }
         }
+    }
+
+    // --- v0.5.0: Action::Deny, Decision::Deny, and mode-flip ---
+
+    #[test]
+    fn action_deny_parses() {
+        // Case-sensitive: matches the existing Allow/Throttle/Prompt
+        // behavior. Configs are written by us, not by users editing
+        // free-form text, so we don't need to be lenient.
+        assert_eq!(Action::from_str("deny"), Some(Action::Deny));
+        assert_eq!(Action::from_str("DENY"), None); // case-sensitive
+        assert_eq!(Action::from_str(" allow "), Some(Action::Allow)); // trim OK
+        assert_eq!(Action::from_str("throttle"), Some(Action::Throttle));
+        assert_eq!(Action::from_str("prompt"), Some(Action::Prompt));
+        assert_eq!(Action::from_str("garbage"), None);
+    }
+
+    #[test]
+    fn decision_deny_exit_code_is_66() {
+        let d = Decision::Deny {
+            reason: "test".into(),
+            hint: None,
+        };
+        assert_eq!(d.exit_code(), 66);
+    }
+
+    #[test]
+    fn decision_deny_json_round_trip() {
+        let d = Decision::Deny {
+            reason: "mode=fail-closed denies by default".into(),
+            hint: Some("pass --agent0waste-bypass".into()),
+        };
+        let json = d.to_json();
+        assert!(json.contains(r#""decision":"deny""#));
+        assert!(json.contains(r#""hint""#));
+        let parsed = Decision::from_json(&json).expect("round-trip");
+        assert_eq!(parsed, d);
+    }
+
+    #[test]
+    fn decision_deny_json_round_trip_no_hint() {
+        let d = Decision::Deny {
+            reason: "rule-fired deny".into(),
+            hint: None,
+        };
+        let json = d.to_json();
+        let parsed = Decision::from_json(&json).expect("round-trip no hint");
+        assert_eq!(parsed, d);
+    }
+
+    #[test]
+    fn pick_decision_mode_fail_closed_default_denies_when_no_rule_fires() {
+        // v0.5.0: when no heuristic fires and mode=fail-closed,
+        // default to Deny. This is the §5-vs-§7 first-class decision.
+        let report = Report::default();
+        assert!(report.findings.is_empty(), "no findings for empty report");
+
+        let mut config = InterceptConfig::defaults();
+        config.mode = Mode::FailClosed;
+
+        let trace = pick_decision(&report, &config, &CheckHint::default());
+        match &trace.decision {
+            Decision::Deny { reason, .. } => {
+                assert!(reason.contains("fail-closed"), "reason mentions mode: {}", reason);
+            }
+            other => panic!("expected Deny under fail-closed, got {:?}", other),
+        }
+        assert!(trace.fired_rule.is_none(), "no rule fired → fired_rule stays None");
+    }
+
+    #[test]
+    fn pick_decision_mode_fail_open_still_allows_when_no_rule_fires() {
+        // Regression guard: fail-closed flip is opt-in. Default
+        // (fail-open) behavior is unchanged from v0.4.x.
+        let report = Report::default();
+        let config = InterceptConfig::defaults(); // FailOpen
+        let trace = pick_decision(&report, &config, &CheckHint::default());
+        assert_eq!(trace.decision, Decision::Allow);
+    }
+
+    #[test]
+    fn pick_decision_rule_fired_with_action_deny_emits_decision_deny() {
+        // v0.5.0: user configures a rule with action=deny.
+        // When that rule fires, the wrapper should deny.
+        let mut report = Report::default();
+        report.findings.push(heuristics::Finding {
+            id: "prompt_growth".into(),
+            severity: Severity::Warn,
+            key: "test-group".into(),
+            message: "prompt grew 1.8x".into(),
+            hint: Some("review recent prompt changes".into()),
+        });
+        let mut config = InterceptConfig::defaults();
+        config.rules.insert(
+            "prompt_growth".into(),
+            RuleConfig { action: Action::Deny, cooldown_s: 0, cache_ttl_s: 30 },
+        );
+        let trace = pick_decision(&report, &config, &CheckHint::default());
+        match &trace.decision {
+            Decision::Deny { reason, hint } => {
+                // Reason comes from the finding message (not the rule
+                // id). The rule id is in `fired_rule` and trace.considered.
+                assert!(reason.contains("prompt grew"), "reason carries finding message: {}", reason);
+                assert_eq!(hint.as_deref(), Some("review recent prompt changes"));
+            }
+            other => panic!("expected rule-driven Deny, got {:?}", other),
+        }
+        assert_eq!(trace.fired_rule.as_deref(), Some("prompt_growth"));
     }
 }

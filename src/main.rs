@@ -468,7 +468,7 @@ enum PricingAction {
 /// `intercept run` (5s default), with a distinct stderr message
 /// and direct exec of the real command if the timeout fires.
 const SHIM_TEMPLATE: &str = r#"#!/usr/bin/env bash
-# Installed by agent0waste intercept enable v0.4.3
+# Installed by agent0waste intercept enable v0.5.0
 # Command: __COMMAND__
 # Timeout: __TIMEOUT__s (per check call; throttle sleep is unbounded)
 # Agent0waste: __AGENT0WASTE_PATH__
@@ -542,6 +542,51 @@ maybe_sandbox() {
 # cancels. Redirecting the child to fd 3 keeps stdin alive for it.
 exec 3<&0
 
+# v0.5.0: bypass flag handling. --agent0waste-bypass (long form
+# only — no short form) is a per-call policy override. We strip
+# it from the args before the intercept check sees them, log the
+# bypass event to ~/.local/share/agent0waste/bypass.log, and
+# override any Deny/Throttle/Prompt decision to Allow. Bypass is
+# a *policy* override; the sandbox still applies (handled by
+# maybe_sandbox). The audit log path can be overridden via
+# $AGENT0WASTE_BYPASS_LOG. If writing the audit log fails, the
+# bypass proceeds anyway (silent on write failure).
+BYPASS_ACTIVE=0
+strip_bypass() {
+    local -a out=()
+    local a
+    for a in "$@"; do
+        if [ "$a" = "--agent0waste-bypass" ]; then
+            BYPASS_ACTIVE=1
+        else
+            out+=("$a")
+        fi
+    done
+    if [ ${#out[@]} -gt 0 ]; then
+        printf '%s\n' "${out[@]}"
+    fi
+}
+
+log_bypass() {
+    local log_path="${AGENT0WASTE_BYPASS_LOG:-$HOME/.local/share/agent0waste/bypass.log}"
+    local log_dir
+    log_dir="$(dirname "$log_path")"
+    mkdir -p "$log_dir" 2>/dev/null || true
+    chmod 700 "$log_dir" 2>/dev/null || true
+    # ISO 8601 UTC, real binary, args (no flag).
+    local ts
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+    if [ -n "$ts" ]; then
+        printf '%s %s %s\n' "$ts" "$REAL" "$*" >> "$log_path" 2>/dev/null || true
+        # Tighten to 0600 if looser. Don't downgrade if already stricter.
+        local mode
+        mode="$(stat -f '%Sp' "$log_path" 2>/dev/null || echo '')"
+        case "$mode" in
+            ???????[2367]*) chmod 600 "$log_path" 2>/dev/null || true ;;
+        esac
+    fi
+}
+
 # do_check ARGS... — run one `intercept check` with a hard timeout.
 # Echoes the decision JSON to stdout, prints stderr to user's stderr.
 # Returns the rc of `intercept check` via subshell $?.
@@ -573,13 +618,44 @@ do_check() {
     return $rc
 }
 
+# v0.5.0: strip bypass flag from $@ before any check happens.
+# The flag is a shim-level concern (audit log needs the real
+# binary path); intercept check itself is bypass-unaware.
+# NOTE: bash 3.2 (macOS default) lacks `mapfile`, so we use a
+# here-doc + read loop. Bash 4+ would let us write `mapfile -t
+# STRIPPED_ARGS < <(strip_bypass "$@")` for one line.
+declare -a STRIPPED_ARGS=()
+while IFS= read -r a; do
+    STRIPPED_ARGS+=("$a")
+done < <(strip_bypass "$@")
+if [ ${#STRIPPED_ARGS[@]} -gt 0 ]; then
+    set -- "${STRIPPED_ARGS[@]}"
+else
+    set --
+fi
+
+if [ "$BYPASS_ACTIVE" = "1" ]; then
+    log_bypass "$@"
+    echo "[agent0waste] bypass active for this call (audit-logged; sandbox still applies)" >&2
+fi
+
 # Initial check. If it fails (timeout, intercept check crash, db
 # unreadable), fail-open: run the real binary. The valid decision rcs
-# are 0 (allow), 64 (throttle), 65 (prompt). Anything else is an
-# error and we fall through to fail-open.
+# are 0 (allow), 64 (throttle), 65 (prompt), 66 (deny). Anything else
+# is an error and we fall through to fail-open.
 CHECK_JSON=$(do_check "$@")
 CHECK_RC=$?
-if [ "$CHECK_RC" != "0" ] && [ "$CHECK_RC" != "64" ] && [ "$CHECK_RC" != "65" ]; then
+
+# v0.5.0: bypass overrides everything. If the user opted into
+# bypass for this call, the check result is informational only;
+# we always exec. Sandbox still applies.
+if [ "$BYPASS_ACTIVE" = "1" ]; then
+    exec 3<&-
+    echo "[agent0waste] bypass overrode decision: rc=$CHECK_RC" >&2
+    maybe_sandbox "$@"
+fi
+
+if [ "$CHECK_RC" != "0" ] && [ "$CHECK_RC" != "64" ] && [ "$CHECK_RC" != "65" ] && [ "$CHECK_RC" != "66" ]; then
     exec 3<&-
     maybe_sandbox "$@"
 fi
@@ -588,6 +664,17 @@ case "$CHECK_RC" in
     0)  # Allow
         exec 3<&-
         maybe_sandbox "$@"
+        ;;
+    66) # v0.5.0 Deny: hard-no. Print reason + hint, do NOT exec.
+        REASON=$(echo "$CHECK_JSON" | grep -oE '"reason":"[^"\\]*(\\.[^"\\]*)*"' | head -1 | sed 's/^"reason":"//' | sed 's/"$//')
+        HINT=$(echo "$CHECK_JSON" | grep -oE '"hint":"[^"\\]*(\\.[^"\\]*)*"' | head -1 | sed 's/^"hint":"//' | sed 's/"$//')
+        exec 3<&-
+        echo "[agent0waste] DENY: $REASON" >&2
+        if [ -n "$HINT" ]; then
+            echo "[agent0waste] hint:  $HINT" >&2
+        fi
+        echo "[agent0waste] (no exec; if this is wrong, retry with --agent0waste-bypass)" >&2
+        exit 66
         ;;
     65) # Prompt: ask the user y/N
         # Extract the reason from the JSON for the user message.
@@ -1425,6 +1512,7 @@ fn format_trace(t: &Trace) -> String {
         Decision::Allow => "allow".to_string(),
         Decision::Throttle { cooldown_s, .. } => format!("throttle  cooldown={}s", cooldown_s),
         Decision::Prompt { .. } => "prompt".to_string(),
+        Decision::Deny { .. } => "deny  (no exec, exit 66)".to_string(),
     };
     let fired_str = match &t.fired_rule {
         Some(r) => format!("  rule={}", r),
@@ -1560,6 +1648,7 @@ fn run_intercept_status() {
             Action::Allow => "allow",
             Action::Throttle => "throttle",
             Action::Prompt => "prompt",
+            Action::Deny => "deny",
         };
         println!(
             "  {:<20}  action={:<8}  cooldown_s={:<3}  cache_ttl_s={}",
@@ -1670,7 +1759,27 @@ fn run_intercept_rules() {
 ///
 /// Called by the shim with:  intercept run -- <real-binary> <args...>
 /// or by the user directly:  agent0waste intercept run -- hermes run foo
+///
+/// v0.5.0: if `--agent0waste-bypass` appears anywhere in real_args, the
+/// shim strips it, audit-logs the bypass event to
+/// `~/.local/share/agent0waste/bypass.log` (silent on write failure),
+/// and overrides any decision (Throttle/Prompt/Deny) to Allow. Bypass
+/// is a *policy* override — the sandbox still applies if enabled.
 fn run_intercept_run(real_binary: &str, real_args: &[&str]) {
+    // 0. v0.5.0: extract --agent0waste-bypass from args (long form
+    //    only, no short form; grep-able in `ps`). Strip it before the
+    //    real binary sees it.
+    let (bypassed, real_args_owned) = extract_bypass_flag(real_args);
+    let real_args: Vec<&str> = real_args_owned.iter().map(|s| s.as_str()).collect();
+
+    if bypassed {
+        log_bypass(real_binary, &real_args);
+        eprintln!(
+            "[agent0waste] bypass active for this call \
+             (audit-logged to bypass.log, sandbox still applies)"
+        );
+    }
+
     // 1. Decide. Reuse the same logic as `intercept check`. We bypass
     //    the `intercept check` subcommand because we're already inside
     //    agent0waste; shelling out would be silly.
@@ -1682,7 +1791,7 @@ fn run_intercept_run(real_binary: &str, real_args: &[&str]) {
     //    logged their own message in load_hermes_sessions.)
     if outcome.is_fail_open() {
         // Don't re-log; load_hermes_sessions already did.
-        spawn_and_record(real_binary, real_args);
+        spawn_and_record(real_binary, &real_args);
         return;
     }
 
@@ -1697,10 +1806,18 @@ fn run_intercept_run(real_binary: &str, real_args: &[&str]) {
 
     let decision = intercept_check_with_cache(&sessions, since, &cfg, &hint, Some(&cmd_str), false);
 
-    // 3. Act on the decision.
+    // 3. Act on the decision. v0.5.0: bypass overrides Throttle,
+    //    Prompt, and Deny. Sandbox still applies (handled in shim
+    //    template, not here).
+    if bypassed {
+        eprintln!("[agent0waste] bypass overrode decision: {:?}", decision_kind(&decision));
+        spawn_and_record(real_binary, &real_args);
+        return;
+    }
+
     match decision {
         Decision::Allow => {
-            spawn_and_record(real_binary, real_args);
+            spawn_and_record(real_binary, &real_args);
         }
         Decision::Throttle { cooldown_s, reason, .. } => {
             eprintln!("[agent0waste] throttle: {}", reason);
@@ -1719,13 +1836,143 @@ fn run_intercept_run(real_binary: &str, real_args: &[&str]) {
                 }
                 _ => {}
             }
-            spawn_and_record(real_binary, real_args);
+            spawn_and_record(real_binary, &real_args);
         }
         Decision::Prompt { reason, hint } => {
             prompt_user(&reason, hint.as_deref());
-            spawn_and_record(real_binary, real_args);
+            spawn_and_record(real_binary, &real_args);
+        }
+        Decision::Deny { reason, hint } => {
+            // v0.5.0: hard-no semantics. Print reason + hint to stderr,
+            // do NOT spawn the real binary. Exit 66 so callers (and
+            // CI) can detect denial. `--agent0waste-bypass` would
+            // have already overridden us above; this is the path
+            // taken when the user invoked the binary *without*
+            // bypass under fail-closed mode.
+            eprintln!("[agent0waste] DENY: {}", reason);
+            if let Some(h) = hint.as_deref() {
+                eprintln!("[agent0waste] hint:  {}", h);
+            }
+            eprintln!(
+                "[agent0waste] (no exec; if this is wrong, retry with --agent0waste-bypass)"
+            );
+            std::process::exit(66);
         }
     }
+}
+
+/// v0.5.0: pull `--agent0waste-bypass` out of args if present.
+/// Returns (bypassed?, stripped-args). Long form only — no short
+/// form, no `--bypass`, no `-b`. Grep-able in `ps`.
+fn extract_bypass_flag(args: &[&str]) -> (bool, Vec<String>) {
+    let mut bypassed = false;
+    let mut kept: Vec<String> = Vec::with_capacity(args.len());
+    for a in args {
+        if *a == "--agent0waste-bypass" {
+            bypassed = true;
+            // strip; do not pass to real binary
+        } else {
+            kept.push((*a).to_string());
+        }
+    }
+    (bypassed, kept)
+}
+
+/// v0.5.0: audit-log a bypass event. Contract (see
+/// docs/v0.5.0-design.md §"Audit log"):
+///   path:    $AGENT0WASTE_BYPASS_LOG or ~/.local/share/agent0waste/bypass.log
+///   perms:   0600 on create (file), 0700 on create (dir)
+///   format:  <ISO 8601 UTC> <real-binary-path> <args...>
+///   mode:    append-only, never truncates
+///   failure: silent — write error MUST NOT block the bypass
+fn log_bypass(real_binary: &str, args: &[&str]) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let path = match std::env::var_os("AGENT0WASTE_BYPASS_LOG") {
+        Some(p) => std::path::PathBuf::from(p),
+        None => match dirs_home() {
+            Some(h) => h.join(".local/share/agent0waste/bypass.log"),
+            None => return, // no home → can't audit; user opted into bare env, fail silent
+        },
+    };
+
+    // Best-effort: create parent dir with 0700 if it doesn't exist.
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(parent) {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o700);
+                let _ = std::fs::set_permissions(parent, perms);
+            }
+        }
+    }
+
+    // ISO 8601 UTC timestamp.
+    let now = Utc::now();
+    let ts = now.format("%Y-%m-%dT%H:%M:%SZ");
+
+    // Build the line. Real binary path first, then each arg. Args
+    // containing whitespace are NOT quoted — this is an audit log,
+    // not a shell script. Operators read it with awk/cut.
+    let mut line = format!("{} {} {}", ts, real_binary, args.join(" "));
+    line.push('\n');
+
+    // Append. If the file doesn't exist, create it (mode bits come
+    // from umask — we chmod below to pin 0600). If it exists, we
+    // never re-open it in truncate mode, so perms are preserved.
+    let result = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| f.write_all(line.as_bytes()));
+
+    // Pin file perms to 0600 (user-only RW). We do this on every
+    // write so that if the file was created with a looser umask, we
+    // tighten it on the next append. (If the file already exists
+    // with looser perms, we don't downgrade — that would be a
+    // security policy decision, not a logging concern.)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            // Only tighten if currently looser than 0600. If the user
+            // has already set 0400 or stricter, leave it.
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                let mut perms = meta.permissions();
+                perms.set_mode(mode & 0o700);
+                let _ = std::fs::set_permissions(&path, perms);
+            }
+        }
+    }
+
+    // Silent on failure. Bypass proceeds either way.
+    if let Err(e) = result {
+        eprintln!(
+            "[agent0waste] warning: could not write bypass log at {}: {}",
+            path.display(),
+            e
+        );
+        // ... but still let the bypass proceed.
+    }
+}
+
+/// Short label for a decision, used in the bypass-override notice.
+fn decision_kind(d: &Decision) -> &'static str {
+    match d {
+        Decision::Allow => "allow",
+        Decision::Throttle { .. } => "throttle",
+        Decision::Prompt { .. } => "prompt",
+        Decision::Deny { .. } => "deny",
+    }
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
 }
 
 fn prompt_user(reason: &str, hint: Option<&str>) {

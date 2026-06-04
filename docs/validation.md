@@ -448,3 +448,36 @@ permissive read + tight write boundary.
   `~/.config/agent0waste/sandbox/hermes.sb`
 
 **Tests:** 90/90 (was 81/81, +9 from sandbox module)
+
+---
+
+## v0.5.0-rc — Fail-closed mode + bypass + audit log validation
+
+10 scenarios exercised on `v0.5.0-fail-closed` branch (commit `15ab576` + implementation):
+
+| # | Scenario | Expected | Verified |
+|---|----------|----------|----------|
+| A | fail-closed + no rule fires → Deny (66) | `rc=66`, stderr contains "DENY" | yes |
+| B | fail-open + no rule fires → Allow (0) | `rc=0`, real binary runs | yes |
+| C | fail-closed + `--agent0waste-bypass` → Allow + audit log | `rc=0`, bypass logged, flag stripped from args | yes |
+| D | bypass log file perms = 0600 | `stat -f '%Sp'` returns `-rw-------` | yes |
+| E | bypass log format = ISO 8601 UTC + path + args | Line matches `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z ` | yes |
+| F | trace shows deny (mode-flip) | `intercept trace` shows `deny (no exec, exit 66)` | yes |
+| G | user-configured rule with `action=deny` → Deny (66) | `rc=66`, stderr contains "DENY" | yes |
+| H | bypass overrules rule-driven Deny | `rc=0`, bypass logged, real binary runs | yes |
+| I | bypass proceeds even if log write fails | `rc=0`, real binary runs, no crash on bad `AGENT0WASTE_BYPASS_LOG` | yes |
+| J | bypass flag stripped before exec | Real binary does not see `--agent0waste-bypass` in `argv` | yes |
+
+**Design decisions validated:**
+- **§5 vs §7 first-class decision:** Mode only flips §5 (decision table) defaults. §7 (failure table) outcomes remain unchanged. Heuristic timeouts still fail-open regardless of mode.
+- **`--agent0waste-bypass` is a policy override, not an isolation override:** The sandbox still applies if enabled. The flag is stripped before the real binary sees it, and the event is audit-logged.
+- **Audit log contract:** Path `~/.local/share/agent0waste/bypass.log` (overridable via `$AGENT0WASTE_BYPASS_LOG`), 0600 file perms, 0700 dir perms, format `<ISO 8601 UTC> <binary-path> <args>`, append-only, write failure MUST NOT block the bypass.
+- **Decision::Deny + exit 66:** Hard-no semantics. The shim does NOT exec the real binary on deny.
+
+**Files added/modified in v0.5.0:**
+- `src/intercept.rs`: `Decision::Deny` variant, `Action::Deny` variant, `pick_decision` mode-flip logic, unit tests.
+- `src/main.rs`: Shim template v0.5.0 (bypass stripping + audit log + Deny handling), `run_intercept_run` bypass path, `log_bypass` helper, `format_trace` step 4 rendering.
+- `docs/decision-spec.md`: §5 Deny row, §6 mode table + §5-vs-§7 rule, §9 link to design doc.
+- `docs/v0.5.0-design.md`: Full design doc for fail-closed mode + bypass + audit log.
+
+**Tests:** 97/97 (was 90/90, +7 from v0.5.0 intercept module tests)
