@@ -553,7 +553,7 @@ exec 3<&0
 # bypass proceeds anyway (silent on write failure).
 BYPASS_ACTIVE=0
 strip_bypass() {
-    local -a out=()
+    local out=()
     local a
     for a in "$@"; do
         if [ "$a" = "--agent0waste-bypass" ]; then
@@ -562,6 +562,12 @@ strip_bypass() {
             out+=("$a")
         fi
     done
+    # v0.5.0.1 fix: don't print an empty line when out is empty.
+    # The previous form (${out[@]+...}) printed "" when the array
+    # was empty, which the read loop below appended as a literal
+    # empty arg, breaking commands called with no args
+    # (e.g. `hermes` -> real hermes saw an empty argv[1] and
+    # printed 'invalid choice' instead of starting chat).
     if [ ${#out[@]} -gt 0 ]; then
         printf '%s\n' "${out[@]}"
     fi
