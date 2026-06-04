@@ -450,7 +450,9 @@ enum PricingAction {
 /// The shim template installed by `intercept enable <command>`.
 ///
 /// `__COMMAND__` is replaced with the real command name (e.g. "hermes").
-/// `__TIMEOUT__` is replaced with the install-time timeout (5s default).
+/// `__TIMEOUT__` is replaced with the install-time timeout in seconds
+/// (float, e.g. "0.5"). The shim uses perl for sub-second waits
+/// because BSD sleep on macOS rejects decimal seconds.
 /// `__AGENT0WASTE_PATH__` is replaced with the absolute path to the
 /// `agent0waste` binary that ran `intercept enable`. The shim uses
 /// this absolute path so the user does NOT need `agent0waste` on
@@ -512,11 +514,13 @@ exec 3<&0
 # Echoes the decision JSON to stdout, prints stderr to user's stderr.
 # Returns the rc of `intercept check` via subshell $?.
 #
-# Timeout mechanism: a nohup'd bash subshell sleeps for TIMEOUT then
-# kills the child if it's still alive. nohup detaches the timer from
-# the shim's job table, so a fast check (cache hit, <50ms) doesn't
-# pay the 5s cost. If the check hangs, the timer's kill fires and
-# the shim sees a non-action rc, falling through to fail-open.
+# Timeout mechanism: a nohup'd bash subshell waits for TIMEOUT seconds
+# (using perl for sub-second precision; BSD sleep on macOS rejects
+# decimals like 0.5) then kills the child if it's still alive. nohup
+# detaches the timer from the shim's job table, so a fast check (cache
+# hit, <50ms) doesn't pay the timeout cost. If the check hangs, the
+# timer's kill fires and the shim sees a non-action rc, falling
+# through to fail-open.
 do_check() {
     local outf errf
     outf=$(mktemp); errf=$(mktemp)
@@ -528,7 +532,7 @@ do_check() {
     # If the check finishes first, the kill becomes a no-op (the
     # child is already dead). The kill -0 guard inside the subshell
     # prevents acting on a PID that's been recycled.
-    nohup bash -c "sleep $TIMEOUT 2>/dev/null; if kill -0 $child_pid 2>/dev/null; then echo '[agent0waste: check timed out (${TIMEOUT}s); running unwrapped]' >&2; kill -KILL $child_pid 2>/dev/null || true; fi" >/dev/null 2>&1 &
+    nohup bash -c "perl -e 'select undef,undef,undef,$TIMEOUT' 2>/dev/null; if kill -0 $child_pid 2>/dev/null; then echo '[agent0waste: check timed out (${TIMEOUT}s); running unwrapped]' >&2; kill -KILL $child_pid 2>/dev/null || true; fi" >/dev/null 2>&1 &
     wait "$child_pid" 2>/dev/null
     local rc=$?
     cat "$errf" >&2
@@ -596,7 +600,7 @@ esac
 /// Default timeout (in seconds) for the shim's intercept check call.
 /// v0.4.0 ships with 5s; v0.4.1+ targets 500ms once heuristic output
 /// is cached.
-const DEFAULT_INTERCEPT_TIMEOUT_S: u64 = 5;
+const DEFAULT_INTERCEPT_TIMEOUT_S: f64 = 0.5;
 
 /// Path to the dedicated shim dir (`~/.local/share/agent0waste/shims`).
 ///
