@@ -20,6 +20,28 @@
 //! The cache does NOT try to be a correctness primitive. If it's
 //! corrupted (truncated write, manual edit, version mismatch), it
 //! falls back to an empty cache. Worst case: one extra state.db read.
+//!
+//! ## Corruption behavior (documented for v0.4.1)
+//!
+//! When `HeuristicCache::load_from` reads a file, three failure modes
+//! are possible. All three result in an empty cache; the heuristic
+//! check that follows runs normally and rebuilds the cache on its
+//! next `put()` + `save()`.
+//!
+//! | Failure | Behavior | User-visible? |
+//! |---------|----------|---------------|
+//! | File missing | Empty cache, no warning | No |
+//! | File unreadable (perm denied) | Empty cache, no warning | No |
+//! | File unparseable (invalid JSON) | Empty cache, no warning | No |
+//!
+//! The decision to **not warn** is deliberate: warnings on every shim
+//! invocation (the common case) would be noisy. The shim never blocks
+//! on a corrupt cache — it just treats it as a miss. The rebuild
+//! happens silently.
+//!
+//! This means a corrupt cache can never prevent command execution.
+//! At worst, the user gets one slow check (the heuristic runs) and
+//! then subsequent checks hit the rebuilt cache.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -280,5 +302,58 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let cache = HeuristicCache::load_from(path);
         assert!(cache.get("anything", mtime(1000)).is_none());
+    }
+
+    #[test]
+    fn load_from_corrupt_json_yields_empty_cache() {
+        // Simulate a truncated write, a manual edit gone wrong, or a
+        // version mismatch. The cache must load as empty (not panic,
+        // not silently return Allow for everything). After a put(),
+        // the file is rebuilt correctly.
+        let path = std::env::temp_dir().join(format!(
+            "agent0waste-cache-test-corrupt-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"this is not json { [[ corrupted").unwrap();
+
+        let mut cache = HeuristicCache::load_from(path.clone());
+        assert!(cache.get("anything", mtime(1000)).is_none());
+
+        // The cache can be put() to and saved() to without errors.
+        // The next load_from should see a valid file.
+        cache.put(
+            "hermes run",
+            mtime(1000),
+            Duration::from_secs(30),
+            r#"{"decision":"allow"}"#.into(),
+        );
+        cache.save().unwrap();
+
+        let reloaded = HeuristicCache::load_from(path.clone());
+        assert_eq!(
+            reloaded.get("hermes run", mtime(1000)),
+            Some(r#"{"decision":"allow"}"#)
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_from_partial_json_yields_empty_cache() {
+        // Truncated mid-write: starts valid, ends mid-object.
+        let path = std::env::temp_dir().join(format!(
+            "agent0waste-cache-test-partial-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, br#"{"entries":{"hermes run":{state_db_mtime_unix":1000,"#).unwrap();
+
+        let cache = HeuristicCache::load_from(path.clone());
+        assert!(cache.get("hermes run", mtime(1000)).is_none());
+
+        let _ = std::fs::remove_file(&path);
     }
 }
