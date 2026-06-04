@@ -408,3 +408,43 @@ calls within the 30s cache TTL are warm and ~20-50ms.
 The 500ms shim timeout is still safe; the trace path runs in
 the parent (no shim) but the same heuristic code path is
 exercised.
+
+## v0.4.3-rc — Layer 5 sandbox-exec validation
+
+7 scenarios exercised on `v0.4.3-sandbox-exec` branch
+(commit `c6253ee` + dogfooding):
+
+| # | Scenario | Expected | Verified |
+|---|----------|----------|----------|
+| 1 | `intercept enable hermes` (Layer 4 only) | shim installed with `SANDBOX_ENABLED=0`, no profile | yes |
+| 2 | `intercept trace --command "hermes --version"` (no sandbox) | `[6] sandbox not configured` | yes |
+| 3 | `intercept enable-sandbox hermes` (shim installed) | profile written, flag set, shim re-installed with `SANDBOX_ENABLED=1` | yes |
+| 4 | `intercept validate-sandbox hermes` | `OK: sandbox-exec accepted the profile (exit 0)` | yes |
+| 5 | `intercept trace --command "hermes --version"` (sandbox enabled) | `[6] sandbox enabled (profile=...)` | yes |
+| 6 | Write-deny test: Python under default profile | `~/Desktop/` write DENIED, `~/.hermes/` write ALLOWED | yes |
+| 7 | `intercept enable-sandbox echo_test_cmd` (no shim) | profile + flag written, hint shows exact `intercept enable echo_test_cmd` command | yes |
+| 8 | Out-of-order: `disable hermes` then `enable hermes` | shim re-installed with `SANDBOX_ENABLED=1` (flag persists) | yes |
+
+**Real hermes call** (sandboxed): `hermes --version` through the shim
+→ 30s throttle (cache_bloat) → re-check → real hermes ran inside
+sandbox-exec → exit 0, output identical to unsandboxed.
+
+**Profile design** (default for hermes):
+- `(deny default)` + `(allow file-read*)` near-global
+- `(allow file-write* (subpath "~/.hermes") (subpath "~/.local")
+   (subpath "~/.cache") (subpath "/private/tmp")
+   (subpath "/private/var/folders") (subpath "/dev/null"))`
+- `(allow network-outbound)`; inbound denied by default
+- Process: exec, fork, mach-lookup, signal, system-socket, ipc-posix-shm
+
+**Read restriction deferred to v0.4.5+** (deny `~/.ssh`, `~/.aws`,
+scope outbound to LLM provider hosts). v0.4.3 ships the
+permissive read + tight write boundary.
+
+**Files added in v0.4.3:**
+- `src/sandbox.rs` (~370 lines, 9 unit tests)
+- `src/main.rs` shim template + 3 subcommands + trace step [6]
+- Default profile auto-written to
+  `~/.config/agent0waste/sandbox/hermes.sb`
+
+**Tests:** 90/90 (was 81/81, +9 from sandbox module)

@@ -16,6 +16,7 @@ mod permission;
 mod pricing;
 mod report;
 mod run;
+mod sandbox;
 mod sessions;
 mod types;
 
@@ -467,10 +468,12 @@ enum PricingAction {
 /// `intercept run` (5s default), with a distinct stderr message
 /// and direct exec of the real command if the timeout fires.
 const SHIM_TEMPLATE: &str = r#"#!/usr/bin/env bash
-# Installed by agent0waste intercept enable v0.4.1
+# Installed by agent0waste intercept enable v0.4.3
 # Command: __COMMAND__
 # Timeout: __TIMEOUT__s (per check call; throttle sleep is unbounded)
 # Agent0waste: __AGENT0WASTE_PATH__
+# Sandbox:    __SANDBOX_STATUS__
+# Profile:    __SANDBOX_PROFILE__
 # Disable: agent0waste intercept disable __COMMAND__
 # Audit:   cat "$0"
 set -uo pipefail
@@ -503,6 +506,35 @@ find_real() {
 
 REAL="$(find_real)"
 TIMEOUT="${AGENT0WASTE_INTERCEPT_TIMEOUT:-__TIMEOUT__}"
+
+# Layer 5 (sandbox-exec) state, baked at install time. If
+# SANDBOX_ENABLED=1, exec the real binary inside sandbox-exec with
+# the profile at SANDBOX_PROFILE. v0.4.3: opt-in per shim, toggled
+# by `intercept enable-sandbox` / `intercept disable-sandbox`. See
+# docs/v0.4.3-design.md "CLI surface (command matrix)".
+SANDBOX_ENABLED="__SANDBOX_ENABLED__"
+SANDBOX_PROFILE="__SANDBOX_PROFILE__"
+
+# maybe_sandbox ARGS... — exec the real binary, wrapped in
+# sandbox-exec iff SANDBOX_ENABLED=1 and the profile exists. If
+# sandbox-exec is missing or the profile is gone, fail-open
+# (warn to stderr, exec unwrapped). This matches the intercept
+# check fail-open contract.
+maybe_sandbox() {
+    if [ "$SANDBOX_ENABLED" = "1" ] && [ -n "$SANDBOX_PROFILE" ]; then
+        if [ ! -f "$SANDBOX_PROFILE" ]; then
+            echo "[agent0waste: sandbox profile missing at $SANDBOX_PROFILE; running unwrapped]" >&2
+            exec "$REAL" "$@"
+        fi
+        if [ ! -x "/usr/bin/sandbox-exec" ]; then
+            echo "[agent0waste: /usr/bin/sandbox-exec not found; running unwrapped]" >&2
+            exec "$REAL" "$@"
+        fi
+        exec /usr/bin/sandbox-exec -f "$SANDBOX_PROFILE" "$REAL" "$@"
+    else
+        exec "$REAL" "$@"
+    fi
+}
 
 # Save our stdin on fd 3 before backgrounding. Bash closes stdin in
 # backgrounded children (`cmd &`) when the parent's stdin is a non-TTY
@@ -549,13 +581,13 @@ CHECK_JSON=$(do_check "$@")
 CHECK_RC=$?
 if [ "$CHECK_RC" != "0" ] && [ "$CHECK_RC" != "64" ] && [ "$CHECK_RC" != "65" ]; then
     exec 3<&-
-    exec "$REAL" "$@"
+    maybe_sandbox "$@"
 fi
 
 case "$CHECK_RC" in
     0)  # Allow
         exec 3<&-
-        exec "$REAL" "$@"
+        maybe_sandbox "$@"
         ;;
     65) # Prompt: ask the user y/N
         # Extract the reason from the JSON for the user message.
@@ -571,7 +603,7 @@ case "$CHECK_RC" in
         exec 3<&-
         case "$response" in
             [Yy]|[Yy][Ee][Ss])
-                exec "$REAL" "$@"
+                maybe_sandbox "$@"
                 ;;
             *)
                 echo "[agent0waste] cancelled" >&2
@@ -592,7 +624,7 @@ case "$CHECK_RC" in
         sleep "$COOLDOWN"
         do_check "$@" >/dev/null 2>&1 || true
         exec 3<&-
-        exec "$REAL" "$@"
+        maybe_sandbox "$@"
         ;;
 esac
 "#;
@@ -729,6 +761,10 @@ enum InterceptAction {
         /// Use fail-closed mode instead of fail-open (v0.4.1+).
         #[arg(long)]
         strict: bool,
+        /// Re-install over an existing shim (used by
+        /// `enable-sandbox` / `disable-sandbox` to refresh env vars).
+        #[arg(long)]
+        force: bool,
     },
     /// Remove the wrapper and shell alias (stub for v0.4.0).
     Disable {
@@ -778,6 +814,31 @@ enum InterceptAction {
         /// Catch-all for clap so trailing args aren't rejected.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
         _args: Vec<String>,
+    },
+    /// Layer 5: enable sandbox-exec for an already-installed shim.
+    /// Writes a default SBPL profile and sets `[sandbox.<cmd>] enabled
+    /// = true` in `intercept.toml`. Re-installs the shim with `--force`
+    /// to bake `SANDBOX_ENABLED=1` and `SANDBOX_PROFILE=<path>` env
+    /// vars. If the shim is not yet installed, prints a hint with the
+    /// exact command to run.
+    EnableSandbox {
+        /// Command name to enable sandbox for (e.g. "hermes").
+        command: String,
+    },
+    /// Layer 5: disable sandbox-exec for an installed shim. Sets
+    /// `[sandbox.<cmd>] enabled = false` in `intercept.toml`. Re-installs
+    /// the shim with `--force` to clear the env vars. The profile file
+    /// is left in place; user can re-enable later without rewriting it.
+    DisableSandbox {
+        /// Command name to disable sandbox for.
+        command: String,
+    },
+    /// Layer 5: validate a sandbox profile by running `sandbox-exec -f
+    /// <profile> /bin/true` as a smoke test. Returns 0 on success,
+    /// non-zero on parse error or runtime failure.
+    ValidateSandbox {
+        /// Command name whose profile to validate.
+        command: String,
     },
 }
 
@@ -917,8 +978,8 @@ fn run_intercept(action: &InterceptAction) {
         InterceptAction::Status => {
             run_intercept_status();
         }
-        InterceptAction::Enable { command, strict } => {
-            run_intercept_enable(command, *strict);
+        InterceptAction::Enable { command, strict, force } => {
+            run_intercept_enable(command, *strict, *force);
         }
         InterceptAction::Disable { command } => {
             run_intercept_disable(command);
@@ -951,6 +1012,15 @@ fn run_intercept(action: &InterceptAction) {
             }
             let real_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             run_intercept_run(&real_binary, &real_args);
+        }
+        InterceptAction::EnableSandbox { command } => {
+            run_intercept_enable_sandbox(command);
+        }
+        InterceptAction::DisableSandbox { command } => {
+            run_intercept_disable_sandbox(command);
+        }
+        InterceptAction::ValidateSandbox { command } => {
+            run_intercept_validate_sandbox(command);
         }
     }
 }
@@ -1120,6 +1190,7 @@ struct Trace {
     decision: Decision,
     fired_rule: Option<String>,
     cache_store: CacheStoreOutcome,
+    sandbox: sandbox::SandboxStatus,
     timings: TraceTimings,
 }
 
@@ -1258,6 +1329,10 @@ fn run_intercept_trace(
         decision,
         fired_rule,
         cache_store,
+        // Layer 5 sandbox status: look up by the first token of the
+        // command (matches the shim's command naming). For
+        // --command "hermes --version" we look up "hermes".
+        sandbox: resolve_sandbox_status_for_trace(command),
         timings: TraceTimings {
             load_ms: t_load.as_millis() as u64,
             cache_lookup_ms: t_cache.as_millis() as u64,
@@ -1270,6 +1345,22 @@ fn run_intercept_trace(
     print!("{}", format_trace(&trace));
     // Trace is always exit 0 — it's a preview, not a real exec.
     std::process::exit(0);
+}
+
+/// Extract the binary name from a `--command` arg and return the
+/// sandbox status. For `--command "hermes --version"` we look up
+/// `hermes`. For an empty command we return `NotConfigured`.
+fn resolve_sandbox_status_for_trace(command: Option<&str>) -> sandbox::SandboxStatus {
+    let Some(cmd) = command else {
+        return sandbox::SandboxStatus::NotConfigured;
+    };
+    let binary = cmd.split_whitespace().next().unwrap_or("");
+    if binary.is_empty() {
+        return sandbox::SandboxStatus::NotConfigured;
+    }
+    // Strip path prefix (shim uses full path; config uses bare name).
+    let binary_name = binary.rsplit('/').next().unwrap_or(binary);
+    sandbox::sandbox_status_for(binary_name)
 }
 
 fn format_trace(t: &Trace) -> String {
@@ -1354,6 +1445,25 @@ fn format_trace(t: &Trace) -> String {
     match &t.cache_store {
         CacheStoreOutcome::Written { ttl_s } => s.push_str(&format!("written (ttl={}s)\n", ttl_s)),
         CacheStoreOutcome::Skipped { reason } => s.push_str(&format!("skipped ({})\n", reason)),
+    }
+
+    // [6] sandbox (Layer 5). Rendered as a single line for the
+    // common case (enabled/disabled/NotConfigured) and two-line
+    // form when the profile path is relevant.
+    s.push_str("  [6] sandbox       ");
+    match &t.sandbox {
+        sandbox::SandboxStatus::Enabled { profile } => {
+            s.push_str(&format!("enabled (profile={})\n", profile.display()));
+        }
+        sandbox::SandboxStatus::Disabled { profile } => {
+            s.push_str(&format!("disabled (profile={})\n", profile.display()));
+        }
+        sandbox::SandboxStatus::NotConfigured => s.push_str("not configured\n"),
+        sandbox::SandboxStatus::ProfileMissing { profile } => {
+            s.push_str(&format!("profile missing (profile={})\n", profile.display()));
+        }
+        sandbox::SandboxStatus::UnsupportedHost => s.push_str("skipped (non-macOS)\n"),
+        sandbox::SandboxStatus::SandboxExecMissing => s.push_str("skipped (sandbox-exec missing)\n"),
     }
 
     // timings
@@ -1662,7 +1772,7 @@ fn spawn_and_record(real_binary: &str, real_args: &[&str]) {
 /// (or manually removes the legacy shim). We don't auto-move it because
 /// the legacy shim might shadow the real binary, and moving it changes
 /// which `hermes` runs — better to make the user do it explicitly.
-fn run_intercept_enable(command: &str, _strict: bool) {
+fn run_intercept_enable(command: &str, _strict: bool, force: bool) {
     let Some(dir) = shim_dir() else {
         eprintln!("[agent0waste] no home directory; cannot determine shim dir");
         std::process::exit(70);
@@ -1692,12 +1802,17 @@ fn run_intercept_enable(command: &str, _strict: bool) {
     }
 
     if shim.exists() {
-        eprintln!(
-            "[agent0waste] {} already exists; refusing to overwrite",
-            shim.display()
-        );
-        eprintln!("use --force to overwrite, or `agent0waste intercept disable {}` first", command);
-        std::process::exit(70);
+        if !force {
+            eprintln!(
+                "[agent0waste] {} already exists; refusing to overwrite",
+                shim.display()
+            );
+            eprintln!("use --force to overwrite, or `agent0waste intercept disable {}` first", command);
+            std::process::exit(70);
+        }
+        // --force: re-installing to refresh env vars (called by
+        // enable-sandbox / disable-sandbox after toggling the flag).
+        eprintln!("[agent0waste] re-installing {} (--force)", shim.display());
     }
 
     // Create the shim dir if missing.
@@ -1710,10 +1825,35 @@ fn run_intercept_enable(command: &str, _strict: bool) {
     // its own resolution at run time).
     let real = find_real_command(command).unwrap_or_else(|| command.to_string());
 
+    // Resolve Layer 5 (sandbox) state at install time. The shim
+    // bakes SANDBOX_ENABLED and SANDBOX_PROFILE into its own env;
+    // toggling the flag requires `intercept enable-sandbox` /
+    // `intercept disable-sandbox` to re-run the installer. This
+    // keeps the shim hot path to a single env-var check
+    // (sub-500ms budget) instead of reading intercept.toml on
+    // every exec.
+    let sandbox_cfg = sandbox::SandboxConfig::load();
+    let sandbox_status = sandbox::sandbox_status_for(command);
+    let (sandbox_enabled_str, sandbox_profile_str, sandbox_status_str) = match &sandbox_status {
+        sandbox::SandboxStatus::Enabled { profile } => {
+            ("1", profile.to_string_lossy().to_string(), "enabled".to_string())
+        }
+        _ => {
+            let profile = sandbox_cfg
+                .default_profile_path(command)
+                .to_string_lossy()
+                .to_string();
+            ("0", profile, sandbox_status.label().to_string())
+        }
+    };
+
     let contents = SHIM_TEMPLATE
         .replace("__COMMAND__", command)
         .replace("__TIMEOUT__", &DEFAULT_INTERCEPT_TIMEOUT_S.to_string())
-        .replace("__AGENT0WASTE_PATH__", &current_exe_path());
+        .replace("__AGENT0WASTE_PATH__", &current_exe_path())
+        .replace("__SANDBOX_ENABLED__", sandbox_enabled_str)
+        .replace("__SANDBOX_PROFILE__", &sandbox_profile_str)
+        .replace("__SANDBOX_STATUS__", &sandbox_status_str);
 
     if let Err(e) = std::fs::write(&shim, contents) {
         eprintln!("[agent0waste] could not write {}: {}", shim.display(), e);
@@ -1763,6 +1903,151 @@ fn run_intercept_enable(command: &str, _strict: bool) {
             "add this to your shell rc:  export PATH=\"$HOME/.local/share/agent0waste/shims:$PATH\""
         );
         println!("(put it BEFORE other dirs if you also have hermes/claude installed elsewhere)");
+    }
+}
+
+/// Update `~/.config/agent0waste/intercept.toml` to set the
+/// `[sandbox.<cmd>]` key in-place. Preserves all other content
+/// (mode, rules, comments). Creates the file if missing.
+fn write_sandbox_flag(command: &str, enabled: bool) -> Result<PathBuf, String> {
+    let path = intercept_toml_path().ok_or_else(|| "no home directory".to_string())?;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    // Read existing content (or start with empty if file missing).
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+
+    // Parse existing TOML. If parse fails, we still proceed by
+    // appending a fresh [sandbox.<cmd>] block — the user can hand-fix.
+    let mut table: toml::Table = existing
+        .parse()
+        .map_err(|e| format!("could not parse {}: {}", path.display(), e))?;
+
+    // Ensure [sandbox] table exists, then set/upsert the entry.
+    let sandbox_table = table
+        .entry("sandbox".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| "[sandbox] exists but is not a table".to_string())?;
+
+    let entry = sandbox_table
+        .entry(command.to_string())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| format!("[sandbox.{}] exists but is not a table", command))?;
+    entry.insert("enabled".to_string(), toml::Value::Boolean(enabled));
+
+    let serialized = table.to_string();
+    std::fs::write(&path, serialized)
+        .map_err(|e| format!("could not write {}: {}", path.display(), e))?;
+    Ok(path)
+}
+
+/// Layer 5: enable sandbox-exec for an already-installed shim.
+/// Workflow:
+/// 1. Write the default profile to ~/.config/agent0waste/sandbox/<cmd>.sb
+///    (refuses to overwrite; user can hand-edit).
+/// 2. Set [sandbox.<cmd>] enabled = true in intercept.toml.
+/// 3. If the shim is installed, re-install with --force to bake
+///    SANDBOX_ENABLED=1 and SANDBOX_PROFILE=<path> into the shim.
+/// 4. If the shim is NOT installed, print a hint with the exact
+///    `agent0waste intercept enable <cmd>` command to run.
+fn run_intercept_enable_sandbox(command: &str) {
+    // Step 1: write default profile.
+    match sandbox::write_default_profile(command) {
+        Ok(sandbox::ProfileWriteOutcome::Written { path }) => {
+            println!("wrote profile: {}", path.display());
+        }
+        Ok(sandbox::ProfileWriteOutcome::AlreadyExists { path }) => {
+            println!("profile already exists: {}", path.display());
+            println!("(edit it by hand; not overwriting)");
+        }
+        Err(e) => {
+            eprintln!("[agent0waste] {}", e);
+            std::process::exit(70);
+        }
+    }
+
+    // Step 2: set the flag in intercept.toml.
+    match write_sandbox_flag(command, true) {
+        Ok(path) => println!("set [sandbox.{}] enabled = true in {}", command, path.display()),
+        Err(e) => {
+            eprintln!("[agent0waste] {}", e);
+            std::process::exit(70);
+        }
+    }
+
+    // Step 3 / 4: re-install the shim if it exists, else print hint.
+    let Some(dir) = shim_dir() else {
+        eprintln!("[agent0waste] no home directory; cannot determine shim dir");
+        std::process::exit(70);
+    };
+    let shim = dir.join(command);
+    if shim.exists() {
+        println!("re-installing shim to bake SANDBOX_ENABLED=1...");
+        run_intercept_enable(command, false, true);
+    } else {
+        println!();
+        println!("note: shim not yet installed at {}", shim.display());
+        println!("run this next to install it with sandbox enabled:");
+        println!("  agent0waste intercept enable {}", command);
+    }
+    println!();
+    println!("validate the profile with:");
+    println!("  agent0waste intercept validate-sandbox {}", command);
+}
+
+/// Layer 5: disable sandbox-exec for an installed shim.
+/// Sets [sandbox.<cmd>] enabled = false in intercept.toml and
+/// re-installs the shim with --force to clear the env vars. The
+/// profile file is left in place; user can re-enable later.
+fn run_intercept_disable_sandbox(command: &str) {
+    match write_sandbox_flag(command, false) {
+        Ok(path) => println!("set [sandbox.{}] enabled = false in {}", command, path.display()),
+        Err(e) => {
+            eprintln!("[agent0waste] {}", e);
+            std::process::exit(70);
+        }
+    }
+
+    let Some(dir) = shim_dir() else {
+        eprintln!("[agent0waste] no home directory; cannot determine shim dir");
+        std::process::exit(70);
+    };
+    let shim = dir.join(command);
+    if shim.exists() {
+        println!("re-installing shim to clear SANDBOX_ENABLED...");
+        run_intercept_enable(command, false, true);
+    } else {
+        println!();
+        println!("note: shim not installed at {}", shim.display());
+        println!("nothing to re-install; profile + flag are set for when you install it.");
+    }
+}
+
+/// Layer 5: validate a profile by running `sandbox-exec -f <profile>
+/// /bin/true` as a smoke test. Exits 0 on success, non-zero on
+/// parse error or runtime failure.
+fn run_intercept_validate_sandbox(command: &str) {
+    let cfg = sandbox::SandboxConfig::load();
+    let path = cfg.default_profile_path(command);
+    println!("validating: {}", path.display());
+    match sandbox::validate_profile(&path) {
+        Ok(v) if v.ok => {
+            println!("OK: sandbox-exec accepted the profile (exit {})", v.exit_code);
+        }
+        Ok(v) => {
+            eprintln!("FAILED: sandbox-exec rejected the profile (exit {})", v.exit_code);
+            if !v.stderr.is_empty() {
+                eprintln!("stderr: {}", v.stderr.trim());
+            }
+            std::process::exit(70);
+        }
+        Err(e) => {
+            eprintln!("[agent0waste] {}", e);
+            std::process::exit(70);
+        }
     }
 }
 
