@@ -1,8 +1,10 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 
+mod cache;
 mod core;
 mod cost;
 mod heuristics;
@@ -448,7 +450,9 @@ enum PricingAction {
 /// The shim template installed by `intercept enable <command>`.
 ///
 /// `__COMMAND__` is replaced with the real command name (e.g. "hermes").
-/// `__TIMEOUT__` is replaced with the install-time timeout (5s default).
+/// `__TIMEOUT__` is replaced with the install-time timeout in seconds
+/// (float, e.g. "0.5"). The shim uses perl for sub-second waits
+/// because BSD sleep on macOS rejects decimal seconds.
 /// `__AGENT0WASTE_PATH__` is replaced with the absolute path to the
 /// `agent0waste` binary that ran `intercept enable`. The shim uses
 /// this absolute path so the user does NOT need `agent0waste` on
@@ -463,9 +467,9 @@ enum PricingAction {
 /// `intercept run` (5s default), with a distinct stderr message
 /// and direct exec of the real command if the timeout fires.
 const SHIM_TEMPLATE: &str = r#"#!/usr/bin/env bash
-# Installed by agent0waste intercept enable v0.4.0
+# Installed by agent0waste intercept enable v0.4.1
 # Command: __COMMAND__
-# Timeout: __TIMEOUT__s
+# Timeout: __TIMEOUT__s (per check call; throttle sleep is unbounded)
 # Agent0waste: __AGENT0WASTE_PATH__
 # Disable: agent0waste intercept disable __COMMAND__
 # Audit:   cat "$0"
@@ -493,8 +497,8 @@ find_real() {
         fi
     done
     # Fallback: command not on PATH (or only the shim dir had it).
-    # Print nothing — intercept run will fail loudly, which is
-    # better than the shim silently recursing.
+    # Print nothing — the shim will fail loudly when it tries to exec
+    # the empty $REAL, which is better than the shim silently recursing.
 }
 
 REAL="$(find_real)"
@@ -506,53 +510,97 @@ TIMEOUT="${AGENT0WASTE_INTERCEPT_TIMEOUT:-__TIMEOUT__}"
 # cancels. Redirecting the child to fd 3 keeps stdin alive for it.
 exec 3<&0
 
-# Run intercept run in the background with a hard timeout. If the
-# timeout fires, log a stderr message and exec the real command
-# directly (fail-open: the guardrail is bypassed, the user is told).
-"__AGENT0WASTE_PATH__" intercept run -- "$REAL" "$@" <&3 &
-child_pid=$!
-(
-    sleep "$TIMEOUT" 2>/dev/null || true
-    if kill -0 "$child_pid" 2>/dev/null; then
-        echo "[agent0waste: check timed out (${TIMEOUT}s); running unwrapped]" >&2
-        kill -TERM "$child_pid" 2>/dev/null || true
-        sleep 0.2 2>/dev/null || true
-        kill -KILL "$child_pid" 2>/dev/null || true
-    fi
-) &
-timer_pid=$!
+# do_check ARGS... — run one `intercept check` with a hard timeout.
+# Echoes the decision JSON to stdout, prints stderr to user's stderr.
+# Returns the rc of `intercept check` via subshell $?.
+#
+# Timeout mechanism: a nohup'd bash subshell waits for TIMEOUT seconds
+# (using perl for sub-second precision; BSD sleep on macOS rejects
+# decimals like 0.5) then kills the child if it's still alive. nohup
+# detaches the timer from the shim's job table, so a fast check (cache
+# hit, <50ms) doesn't pay the timeout cost. If the check hangs, the
+# timer's kill fires and the shim sees a non-action rc, falling
+# through to fail-open.
+do_check() {
+    local outf errf
+    outf=$(mktemp); errf=$(mktemp)
+    (
+        "__AGENT0WASTE_PATH__" intercept check --command "$REAL $*" <&3
+    ) > "$outf" 2> "$errf" &
+    local child_pid=$!
+    # Background timer, fully detached from this shell's job table.
+    # If the check finishes first, the kill becomes a no-op (the
+    # child is already dead). The kill -0 guard inside the subshell
+    # prevents acting on a PID that's been recycled.
+    nohup bash -c "perl -e 'select undef,undef,undef,$TIMEOUT' 2>/dev/null; if kill -0 $child_pid 2>/dev/null; then echo '[agent0waste: check timed out (${TIMEOUT}s); running unwrapped]' >&2; kill -KILL $child_pid 2>/dev/null || true; fi" >/dev/null 2>&1 &
+    wait "$child_pid" 2>/dev/null
+    local rc=$?
+    cat "$errf" >&2
+    cat "$outf"
+    rm -f "$outf" "$errf"
+    return $rc
+}
 
-wait "$child_pid" 2>/dev/null
-rc=$?
-
-# Cancel the timer if it's still pending.
-kill "$timer_pid" 2>/dev/null || true
-wait "$timer_pid" 2>/dev/null || true
-
-# Close our saved stdin copy.
-exec 3<&-
-
-# Fail-open: if `intercept run` didn't handle the call itself, fall
-# through to running the real binary. intercept run's behavior:
-#   - rc=0: it already ran the real binary (allow / throttle re-check
-#     that allowed / prompt accepted / fail-open that ran). Don't
-#     double-execute.
-#   - rc=1: prompt_user saw the user answer N and printed "cancelled".
-#     The user explicitly said don't run; respect that.
-#   - rc=other: something went wrong (our 5s timeout killing the
-#     check, intercept run crashing, binary missing, etc.). Fail-open:
-#     run the real binary here in the shim.
-if [ "$rc" != "0" ] && [ "$rc" != "1" ]; then
+# Initial check. If it fails (timeout, intercept check crash, db
+# unreadable), fail-open: run the real binary. The valid decision rcs
+# are 0 (allow), 64 (throttle), 65 (prompt). Anything else is an
+# error and we fall through to fail-open.
+CHECK_JSON=$(do_check "$@")
+CHECK_RC=$?
+if [ "$CHECK_RC" != "0" ] && [ "$CHECK_RC" != "64" ] && [ "$CHECK_RC" != "65" ]; then
+    exec 3<&-
     exec "$REAL" "$@"
 fi
 
-exit $rc
+case "$CHECK_RC" in
+    0)  # Allow
+        exec 3<&-
+        exec "$REAL" "$@"
+        ;;
+    65) # Prompt: ask the user y/N
+        # Extract the reason from the JSON for the user message.
+        # Robust enough for heuristic reasons (short, no nested quotes);
+        # if a heuristic ever produces escaped quotes, the user just sees
+        # an empty [prompt: ] line and can still answer y/N.
+        REASON=$(echo "$CHECK_JSON" | grep -oE '"reason":"[^"\\]*(\\.[^"\\]*)*"' | head -1 | sed 's/^"reason":"//' | sed 's/"$//')
+        if [ -n "$REASON" ]; then
+            echo "[agent0waste] prompt: $REASON" >&2
+        fi
+        echo "[agent0waste] continue? [y/N]" >&2
+        read -r response <&3
+        exec 3<&-
+        case "$response" in
+            [Yy]|[Yy][Ee][Ss])
+                exec "$REAL" "$@"
+                ;;
+            *)
+                echo "[agent0waste] cancelled" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    64) # Throttle: parse cooldown_s, sleep, re-check, then run.
+        # The re-check output is discarded: the throttle is a guardrail,
+        # not a gate. Even if the re-check still says throttle, we run.
+        COOLDOWN=$(echo "$CHECK_JSON" | grep -oE '"cooldown_s":[0-9]+' | grep -oE '[0-9]+' | head -1)
+        if [ -z "$COOLDOWN" ]; then COOLDOWN=30; fi
+        REASON=$(echo "$CHECK_JSON" | grep -oE '"reason":"[^"\\]*(\\.[^"\\]*)*"' | head -1 | sed 's/^"reason":"//' | sed 's/"$//')
+        if [ -n "$REASON" ]; then
+            echo "[agent0waste] throttle: $REASON" >&2
+        fi
+        echo "[agent0waste] sleeping ${COOLDOWN}s, then re-checking..." >&2
+        sleep "$COOLDOWN"
+        do_check "$@" >/dev/null 2>&1 || true
+        exec 3<&-
+        exec "$REAL" "$@"
+        ;;
+esac
 "#;
 
 /// Default timeout (in seconds) for the shim's intercept check call.
 /// v0.4.0 ships with 5s; v0.4.1+ targets 500ms once heuristic output
 /// is cached.
-const DEFAULT_INTERCEPT_TIMEOUT_S: u64 = 5;
+const DEFAULT_INTERCEPT_TIMEOUT_S: f64 = 0.5;
 
 /// Path to the dedicated shim dir (`~/.local/share/agent0waste/shims`).
 ///
@@ -668,6 +716,9 @@ enum InterceptAction {
         /// Look back N days (default 7). 0 = "always".
         #[arg(long, default_value_t = 7)]
         since: i64,
+        /// Skip the heuristic cache (force a fresh check).
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Show the current interception state (stub for v0.4.0).
     Status,
@@ -837,8 +888,8 @@ fn run_pricing(action: &PricingAction) {
 
 fn run_intercept(action: &InterceptAction) {
     match action {
-        InterceptAction::Check { model, tokens, command, source, since } => {
-            run_intercept_check(model.as_deref(), *tokens, command.as_deref(), source, *since);
+        InterceptAction::Check { model, tokens, command, source, since, no_cache } => {
+            run_intercept_check(model.as_deref(), *tokens, command.as_deref(), source, *since, *no_cache);
         }
         InterceptAction::Status => {
             run_intercept_status();
@@ -884,6 +935,7 @@ fn run_intercept_check(
     command: Option<&str>,
     source: &str,
     since_days: i64,
+    no_cache: bool,
 ) {
     // We need the same Hermes data `cost --from-hermes` reads. If the
     // state.db is unreadable, fail-open: emit `allow`.
@@ -908,9 +960,84 @@ fn run_intercept_check(
         source: Some(source.to_string()),
     };
 
-    let decision = intercept_check(&sessions, since, &cfg, &hint);
-    println!("{}", decision.to_json());
+    let decision = intercept_check_with_cache(
+        &sessions,
+        since,
+        &cfg,
+        &hint,
+        command,
+        no_cache,
+    );
+    let json = decision.to_json();
+    println!("{}", json);
     std::process::exit(decision.exit_code());
+}
+
+/// Run heuristics with the persistent cache in front. On a hit, returns
+/// the cached decision without re-running heuristics (skips the
+/// 150ms state.db read entirely). On a miss, runs heuristics and
+/// stores the result.
+///
+/// Cache key: the `command` field of the hint. Returns Allow on a hit
+/// with a missing or unparseable cache entry (treated as a miss).
+fn intercept_check_with_cache(
+    sessions: &[hermes_state::HermesSession],
+    since: DateTime<Utc>,
+    cfg: &InterceptConfig,
+    hint: &CheckHint,
+    cache_key_hint: Option<&str>,
+    no_cache: bool,
+) -> Decision {
+    let cache_key = cache_key_for(cache_key_hint);
+    let state_db_path = crate::hermes_state::default_state_path();
+
+    if !no_cache {
+        if let Some(key) = cache_key.as_deref() {
+            if let Some(path) = state_db_path.as_deref() {
+                if let Some(mtime) = state_db_mtime(path) {
+                    let cache = cache::HeuristicCache::load();
+                    if let Some(cached_json) = cache.get(key, mtime) {
+                        if let Some(cached) = Decision::from_json(cached_json) {
+                            return cached;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let decision = intercept_check(sessions, since, cfg, hint);
+    let json = decision.to_json();
+
+    // Store in cache. TTL is a fixed 30s for v0.4.1; per-rule
+    // `cache_ttl_s` is plumbed into the config and shown in
+    // `intercept status` but not yet threaded into the cache
+    // integration (which rule fired is hidden by `pick_decision`).
+    // Tracked as a follow-up: see issue #7.
+    if !no_cache {
+        if let Some(key) = cache_key.as_deref() {
+            if let Some(path) = state_db_path.as_deref() {
+                if let Some(mtime) = state_db_mtime(path) {
+                    let mut cache = cache::HeuristicCache::load();
+                    cache.put(key, mtime, Duration::from_secs(30), json);
+                    let _ = cache.save();
+                }
+            }
+        }
+    }
+
+    decision
+}
+
+/// Build a cache key from the `--command` hint. Returns `None` if no
+/// command was specified (the user just wanted a one-off check with no
+/// key to remember).
+fn cache_key_for(command: Option<&str>) -> Option<String> {
+    command.map(|s| s.to_string())
+}
+
+fn state_db_mtime(path: &std::path::Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
 }
 
 fn run_intercept_status() {
@@ -939,7 +1066,10 @@ fn run_intercept_status() {
             Action::Throttle => "throttle",
             Action::Prompt => "prompt",
         };
-        println!("  {:<20}  action={:<8}  cooldown_s={}", id, action, rule.cooldown_s);
+        println!(
+            "  {:<20}  action={:<8}  cooldown_s={:<3}  cache_ttl_s={}",
+            id, action, rule.cooldown_s, rule.cache_ttl_s
+        );
     }
 
     // Shim install state — the actionable part of `status`.
@@ -1066,11 +1196,11 @@ fn run_intercept_run(real_binary: &str, real_args: &[&str]) {
     let hint = CheckHint {
         model: None, // the shim doesn't know the model; leave None
         tokens: None,
-        command: if cmd_str.is_empty() { None } else { Some(cmd_str) },
+        command: if cmd_str.is_empty() { None } else { Some(cmd_str.clone()) },
         source: Some("cli".into()),
     };
 
-    let decision = intercept_check(&sessions, since, &cfg, &hint);
+    let decision = intercept_check_with_cache(&sessions, since, &cfg, &hint, Some(&cmd_str), false);
 
     // 3. Act on the decision.
     match decision {
