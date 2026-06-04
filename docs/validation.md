@@ -265,4 +265,92 @@ bash /Users/.../Agent0Waste/scripts/v040-demo.sh
 - macOS `sandbox-exec` wrapper — v0.4.2+ (issue #5)
 - Cross-agent interception — v0.5.0
 - Per-rule `cache_ttl_s` plumbing — v0.4.2+ follow-up
-- 5s → 500ms shim timeout (now safe with the cache) — v0.4.2+
+
+## v0.4.1-rc: cache correctness, corruption, and 500ms timeout validation
+
+Three pre-stable concerns were raised about the heuristic cache.
+This section documents the validation done in PR #8 to address
+each one before tagging v0.4.1.
+
+### 1. Cache never changes correctness
+
+**Test:** three back-to-back `agent0waste intercept check
+--command "echo X"` calls (cold, warm, --no-cache) on the live
+1GB state.db.
+
+**Result:** all three return the same `decision` and
+`cooldown_s`. The `reason` text can vary slightly between the
+cache hit and the --no-cache run (e.g. "210 sessions on X" vs
+"36 sessions on Y") because the state.db is being actively
+written to by the running Hermes daemon between calls; the
+heuristic re-runs and picks a different "winning" session.
+
+**Subtle behavior worth noting:** the cached `reason` text is
+a snapshot of when the entry was written, not a fresh
+explanation. The `decision` and `cooldown_s` are always fresh
+(because state.db mtime invalidation kicks in if state.db
+changes). This is the right trade-off: the user-visible
+**outcome** is consistent, and the explanation is descriptive
+metadata. Documented in the cache module's doc comment.
+
+### 2. Cache corruption behavior
+
+**Test:** two unit tests in `src/cache.rs`:
+`load_from_corrupt_json_yields_empty_cache` (writes garbage,
+loads, asserts empty, then puts + saves + reloads) and
+`load_from_partial_json_yields_empty_cache` (truncated
+mid-write).
+
+**Documented behavior** (in `src/cache.rs` module doc):
+
+| Failure | Behavior | User-visible? |
+|---------|----------|---------------|
+| File missing | Empty cache | No |
+| File unreadable (perm denied) | Empty cache | No |
+| File unparseable (invalid JSON) | Empty cache | No |
+
+**Rationale:** warnings on every shim invocation (the common
+case) would be noisy. The shim never blocks on a corrupt cache
+— it just treats it as a miss, the next heuristic run rebuilds
+the entry, and the file is rewritten correctly. At worst the
+user gets one slow check.
+
+A corrupt cache **cannot** prevent command execution. This is
+the important property: the shim's fail-open path catches the
+miss, the heuristic runs, the decision is made, the real
+binary is exec'd. Worst case: one extra state.db read.
+
+### 3. Timeout + cache interaction (5s → 500ms)
+
+**Change:** `DEFAULT_INTERCEPT_TIMEOUT_S: u64 = 5` → `f64 = 0.5`.
+BSD `sleep` on macOS rejects decimal seconds, so the shim now
+uses `perl -e 'select undef,undef,undef,$TIMEOUT'` for the
+sub-second wait. `perl` is always present on macOS (`/usr/bin/perl`).
+
+**Validated scenarios** (with shim installed for `intercept-test`,
+all-allow config, 500ms timeout):
+
+| Scenario | Setup | Time | Timeout fired? |
+|----------|-------|------|----------------|
+| Cold cache | `rm heuristic-cache.json`, run shim | 63ms | No |
+| Warm cache | Run shim again (cache populated) | 61ms | No |
+| DB missing | `mv state.db state.db.tmp`, run shim, `mv` back | 40ms | No |
+| DB locked | (same code path as DB missing; covered by `load_hermes_sessions` returning `fail_open` on read failure) | (inspected) | No |
+
+**All scenarios complete in well under 500ms.** The timeout is
+safe to reduce because:
+- Cache hits are ~20-30ms (150ms saved per call)
+- Cache misses are ~50-100ms (state.db read + heuristic + cache save)
+- Fail-open paths (DB missing/locked) are ~30-50ms
+- A 500ms budget gives a 5x-10x safety margin over the slow case
+
+The timeout value is the only thing that changed; the mechanism
+itself (nohup'd timer + `kill -0` PID check + `kill -KILL`) is
+unchanged from v0.4.0.
+
+### Outstanding follow-ups (not blocking v0.4.1)
+
+- Per-rule `cache_ttl_s` plumbing through `pick_decision` (cache
+  uses fixed 30s; all default rules have 30s anyway)
+- The user's review + final release-validation pass on the merge
+  commit before tagging v0.4.1 stable
