@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod cache;
 mod core;
@@ -743,6 +743,29 @@ enum InterceptAction {
     },
     /// Show the rule table that `check` consults.
     Rules,
+    /// Render the decision pipeline as a human-readable trace
+    /// (spec §3). Pure preview — does NOT exec the real binary.
+    /// v0.4.2.
+    Trace {
+        /// Model hint (used in the decision message only).
+        #[arg(long)]
+        model: Option<String>,
+        /// Estimated input tokens (used in the decision message only).
+        #[arg(long)]
+        tokens: Option<u64>,
+        /// The command being wrapped (used in the decision message only).
+        #[arg(long)]
+        command: Option<String>,
+        /// Source of the call: cli | cron. Default: cli.
+        #[arg(long, default_value = "cli")]
+        source: String,
+        /// Look back N days (default 7). 0 = "always".
+        #[arg(long, default_value_t = 7)]
+        since: i64,
+        /// Skip the heuristic cache (force a fresh trace).
+        #[arg(long)]
+        no_cache: bool,
+    },
     /// Layer 4 + Layer 2: check, then spawn the real command, then
     /// record the session. Used by the shim.
     ///
@@ -906,6 +929,9 @@ fn run_intercept(action: &InterceptAction) {
         InterceptAction::Rules => {
             run_intercept_rules();
         }
+        InterceptAction::Trace { model, tokens, command, source, since, no_cache } => {
+            run_intercept_trace(model.as_deref(), *tokens, command.as_deref(), source, *since, *no_cache);
+        }
         InterceptAction::Run { .. } => {
             // `agent0waste intercept run -- <real-binary> <args...>`
             // The shim execs us with:  intercept run -- "$REAL" "$@"
@@ -1034,6 +1060,365 @@ fn intercept_check_with_cache(
 /// key to remember).
 fn cache_key_for(command: Option<&str>) -> Option<String> {
     command.map(|s| s.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Trace mode (v0.4.2)
+//
+// Renders the decision pipeline (spec §3) as a human-readable trace.
+// Steps:
+//   [1] load_hermes_sessions       — read state.db
+//   [2] cache_lookup               — hit/miss/disable
+//   [3] heuristics                 — per-rule considered list
+//   [4] decision                   — final action + fired rule
+//   [5] cache_store                — ALWAYS skipped (trace is preview-only)
+//
+// Pure preview: does NOT exec the real binary AND does NOT write to
+// the cache. Useful for debugging "why did the shim do X" without
+// having to actually run X and without warming the cache for the
+// next real check. Honors spec §3 conformance rule #1: cache is
+// latency-only, so a preview run cannot mutate cache state.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+enum LoadOutcome {
+    Loaded { size_bytes: u64, mtime: SystemTime },
+    FailOpen { reason: String },
+}
+
+#[derive(Debug)]
+enum CacheLookupOutcome {
+    Hit { age_s: u64 },
+    Miss { reason: String },
+    Disabled,
+    NoKey,
+    NoMtime,
+}
+
+#[derive(Debug)]
+enum CacheStoreOutcome {
+    Written { ttl_s: u64 },
+    Skipped { reason: String },
+}
+
+#[derive(Debug)]
+struct TraceTimings {
+    load_ms: u64,
+    cache_lookup_ms: u64,
+    eval_ms: u64,
+    cache_store_ms: u64,
+    total_ms: u64,
+}
+
+#[derive(Debug)]
+struct Trace {
+    command: String,
+    since_days: i64,
+    load: LoadOutcome,
+    cache_lookup: CacheLookupOutcome,
+    heuristics: Vec<intercept::ConsideredRule>,
+    decision: Decision,
+    fired_rule: Option<String>,
+    cache_store: CacheStoreOutcome,
+    timings: TraceTimings,
+}
+
+fn run_intercept_trace(
+    model: Option<&str>,
+    tokens: Option<u64>,
+    command: Option<&str>,
+    source: &str,
+    since_days: i64,
+    no_cache: bool,
+) {
+    let since = if since_days <= 0 {
+        chrono::DateTime::<Utc>::from_timestamp(0, 0).unwrap()
+    } else {
+        Utc::now() - chrono::Duration::days(since_days)
+    };
+    let command_str = command.unwrap_or("").to_string();
+
+    let t_total_start = std::time::Instant::now();
+    let t_load_start = std::time::Instant::now();
+
+    // [1] load state.db
+    let (sessions, load_outcome) = intercept::load_hermes_sessions(since, None);
+    let t_load = t_load_start.elapsed();
+    let load = match &load_outcome {
+        intercept::LoadOutcome::Loaded(_) => {
+            let path = crate::hermes_state::default_state_path()
+                .unwrap_or_else(|| PathBuf::from("?"));
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            LoadOutcome::Loaded { size_bytes: size, mtime }
+        }
+        intercept::LoadOutcome::NoHome => LoadOutcome::FailOpen { reason: "no home directory".to_string() },
+        intercept::LoadOutcome::Missing(p) => LoadOutcome::FailOpen { reason: format!("state.db not found at {}", p.display()) },
+        intercept::LoadOutcome::Unreadable(p, e) => LoadOutcome::FailOpen { reason: format!("could not read {}: {}", p.display(), e) },
+    };
+    // If load failed, the rest of the pipeline is fail-open Allow.
+    let sessions_load_failed = load_outcome.is_fail_open();
+
+    // [2] cache lookup
+    let cache_key = cache_key_for(command);
+    let state_db_path = crate::hermes_state::default_state_path();
+    let t_cache_start = std::time::Instant::now();
+
+    let cache_lookup = if no_cache {
+        CacheLookupOutcome::Disabled
+    } else if cache_key.is_none() {
+        CacheLookupOutcome::NoKey
+    } else if state_db_path.is_none() {
+        CacheLookupOutcome::NoMtime
+    } else {
+        let path = state_db_path.as_deref().unwrap();
+        let mtime = state_db_mtime(path);
+        if mtime.is_none() {
+            CacheLookupOutcome::NoMtime
+        } else {
+            let mtime = mtime.unwrap();
+            let key = cache_key.as_deref().unwrap();
+            let cache = cache::HeuristicCache::load();
+            match cache.get(key, mtime) {
+                Some(_) => {
+                    // Compute age from the cache entry.
+                    let now = cache_now_unix();
+                    let age_s = cache
+                        .get_age_s(key, now)
+                        .unwrap_or(0);
+                    CacheLookupOutcome::Hit { age_s }
+                }
+                None => CacheLookupOutcome::Miss {
+                    reason: "no entry or stale".to_string(),
+                },
+            }
+        }
+    };
+    let t_cache = t_cache_start.elapsed();
+    let cache_hit = matches!(cache_lookup, CacheLookupOutcome::Hit { .. });
+
+    // [3] heuristics
+    let t_eval_start = std::time::Instant::now();
+    let cfg = InterceptConfig::load();
+    let hint = CheckHint {
+        model: model.map(|s| s.to_string()),
+        tokens,
+        command: command.map(|s| s.to_string()),
+        source: Some(source.to_string()),
+    };
+
+    let (decision, fired_rule, considered) = if sessions_load_failed {
+        (Decision::Allow, None, Vec::new())
+    } else if cache_hit {
+        // Re-parse the cached JSON to get the decision. We don't
+        // re-run heuristics, so the considered list is empty (the
+        // trace shows that the decision came from the cache).
+        let path = state_db_path.as_deref().unwrap();
+        let mtime = state_db_mtime(path).unwrap();
+        let key = cache_key.as_deref().unwrap();
+        let cache = cache::HeuristicCache::load();
+        let cached = cache.get(key, mtime).unwrap();
+        let dec = Decision::from_json(cached).unwrap_or(Decision::Allow);
+        (dec, None, Vec::new())
+    } else {
+        let tr = intercept::check_with_trace(&sessions, since, &cfg, &hint);
+        (tr.decision, tr.fired_rule, tr.considered)
+    };
+    let t_eval = t_eval_start.elapsed();
+
+    // [5] cache store — ALWAYS skipped for trace. Trace is a pure
+    // preview (spec §3 + conformance rule #1: cache is latency-only);
+    // a trace run must not warm the cache for a subsequent real check.
+    // The conditional skip reasons below are kept for documentation
+    // (what WOULD have happened in a real `intercept check`).
+    let t_store_start = std::time::Instant::now();
+    let cache_store = if no_cache {
+        CacheStoreOutcome::Skipped { reason: "--no-cache".to_string() }
+    } else if cache_key.is_none() {
+        CacheStoreOutcome::Skipped { reason: "no command key".to_string() }
+    } else if state_db_path.is_none() || state_db_mtime(state_db_path.as_deref().unwrap()).is_none() {
+        CacheStoreOutcome::Skipped { reason: "no state.db mtime".to_string() }
+    } else if cache_hit {
+        CacheStoreOutcome::Skipped { reason: "cache hit (already stored)".to_string() }
+    } else {
+        // The would-be-write path. Always skipped for trace.
+        CacheStoreOutcome::Skipped { reason: "trace is preview-only".to_string() }
+    };
+    let t_store = t_store_start.elapsed();
+
+    let t_total = t_total_start.elapsed();
+
+    let trace = Trace {
+        command: command_str,
+        since_days,
+        load,
+        cache_lookup,
+        heuristics: considered,
+        decision,
+        fired_rule,
+        cache_store,
+        timings: TraceTimings {
+            load_ms: t_load.as_millis() as u64,
+            cache_lookup_ms: t_cache.as_millis() as u64,
+            eval_ms: t_eval.as_millis() as u64,
+            cache_store_ms: t_store.as_millis() as u64,
+            total_ms: t_total.as_millis() as u64,
+        },
+    };
+
+    print!("{}", format_trace(&trace));
+    // Trace is always exit 0 — it's a preview, not a real exec.
+    std::process::exit(0);
+}
+
+fn format_trace(t: &Trace) -> String {
+    let mut s = String::new();
+    let cmd_display = if t.command.is_empty() { "(none)" } else { &t.command };
+    s.push_str(&format!("trace: {}\n", cmd_display));
+
+    // [1] load
+    s.push_str("  [1] load          ");
+    match &t.load {
+        LoadOutcome::Loaded { size_bytes, mtime } => {
+            let size_str = human_size(*size_bytes);
+            let mtime_str = format_mtime(*mtime);
+            s.push_str(&format!("state.db {} mtime {}\n", size_str, mtime_str));
+        }
+        LoadOutcome::FailOpen { reason } => {
+            s.push_str(&format!("FAIL-OPEN — {}\n", reason));
+        }
+    }
+
+    // [2] cache lookup
+    s.push_str("  [2] cache         ");
+    match &t.cache_lookup {
+        CacheLookupOutcome::Hit { age_s } => {
+            s.push_str(&format!("HIT (age {}s)\n", age_s));
+        }
+        CacheLookupOutcome::Miss { reason } => {
+            s.push_str(&format!("MISS ({})\n", reason));
+        }
+        CacheLookupOutcome::Disabled => s.push_str("DISABLED (--no-cache)\n"),
+        CacheLookupOutcome::NoKey => s.push_str("SKIPPED (no --command)\n"),
+        CacheLookupOutcome::NoMtime => s.push_str("SKIPPED (no state.db mtime)\n"),
+    }
+
+    // [3] heuristics
+    s.push_str("  [3] heuristics    ");
+    if t.heuristics.is_empty() {
+        // Cache hit or load failed.
+        match &t.cache_lookup {
+            CacheLookupOutcome::Hit { .. } => s.push_str("skipped (cache hit)\n"),
+            _ => s.push_str("(none evaluated)\n"),
+        }
+    } else {
+        // First heuristic on the [3] line, rest indented.
+        let mut first = true;
+        for h in &t.heuristics {
+            let prefix = if first { "" } else { "                  " };
+            first = false;
+            let action = format!("{:?}", h.action).to_lowercase();
+            if h.fired {
+                let detail = if h.detail.is_empty() { String::new() } else { format!(" ({})", h.detail) };
+                s.push_str(&format!("{}{} → {}{}\n", prefix, h.rule_id, action, detail));
+            } else {
+                s.push_str(&format!("{}{} → {}\n", prefix, h.rule_id, action));
+            }
+        }
+    }
+
+    // [4] decision
+    s.push_str("  [4] decision      ");
+    let decision_str = match &t.decision {
+        Decision::Allow => "allow".to_string(),
+        Decision::Throttle { cooldown_s, .. } => format!("throttle  cooldown={}s", cooldown_s),
+        Decision::Prompt { .. } => "prompt".to_string(),
+    };
+    let fired_str = match &t.fired_rule {
+        Some(r) => format!("  rule={}", r),
+        None => {
+            if matches!(t.cache_lookup, CacheLookupOutcome::Hit { .. }) {
+                "  source=cache".to_string()
+            } else if matches!(t.load, LoadOutcome::FailOpen { .. }) {
+                "  source=fail-open".to_string()
+            } else {
+                String::new()
+            }
+        }
+    };
+    s.push_str(&format!("{}{}\n", decision_str, fired_str));
+
+    // [5] cache store
+    s.push_str("  [5] cache store   ");
+    match &t.cache_store {
+        CacheStoreOutcome::Written { ttl_s } => s.push_str(&format!("written (ttl={}s)\n", ttl_s)),
+        CacheStoreOutcome::Skipped { reason } => s.push_str(&format!("skipped ({})\n", reason)),
+    }
+
+    // timings
+    s.push_str(&format!(
+        "  timing            load={}ms  cache={}ms  eval={}ms  store={}ms  total={}ms\n",
+        t.timings.load_ms, t.timings.cache_lookup_ms, t.timings.eval_ms, t.timings.cache_store_ms, t.timings.total_ms
+    ));
+
+    s
+}
+
+fn human_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.0} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.0} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn format_mtime(t: SystemTime) -> String {
+    let dur = t.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = dur.as_secs();
+    // Format as YYYY-MM-DD HH:MM:SS (local-ish; we use UTC for stability).
+    let (year, month, day, hour, minute, second) = unix_to_ymdhms(secs);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        year, month, day, hour, minute, second
+    )
+}
+
+fn unix_to_ymdhms(secs: u64) -> (i32, u32, u32, u32, u32, u32) {
+    // Days since 1970-01-01
+    let days = (secs / 86400) as i64;
+    let rem = secs % 86400;
+    let hour = (rem / 3600) as u32;
+    let minute = ((rem % 3600) / 60) as u32;
+    let second = (rem % 60) as u32;
+    let (year, month, day) = days_to_ymd(days);
+    (year, month, day, hour, minute, second)
+}
+
+fn days_to_ymd(days: i64) -> (i32, u32, u32) {
+    // Civil-from-days algorithm (Howard Hinnant).
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m, d)
+}
+
+fn cache_now_unix() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 fn state_db_mtime(path: &std::path::Path) -> Option<SystemTime> {
