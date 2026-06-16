@@ -2,7 +2,7 @@
 
 > Local-first waste scanner for AI agent CLIs — Hermes, Claude Code, OpenCode, and more.
 >
-> v0.4.1-beta · **macOS-only** · Linux/Windows on the roadmap
+> v0.5.0 · **macOS-only** · Linux/Windows on the roadmap
 
 Shows exactly what is wasting RAM, disk space, and tokens on your machine —
 with **zero data leaving your device**.
@@ -283,7 +283,7 @@ delta.
 | 1 — Audit | shipped (v0.1) | Scan for config bloat, tool waste, memory pressure, model awareness |
 | 2 — Accounting | shipped (v0.2.1) | Per-tool / per-model / per-session token tracking + cost estimation from `state.db` |
 | 3 — Heuristics | shipped (v0.3.1) | `cache_bloat`, `prompt_growth`, `auto_routing`, `model_instability` findings |
-| 4 — Interception | shipped (v0.4.1-beta + v0.5.0) | Per-command shim (`allow` / `throttle` / `prompt` / `deny`). Fail-open by default; opt-in fail-closed with `--agent0waste-bypass` override. macOS-only. |
+| 4 — Interception | shipped (v0.5.0) | Per-command shim (`allow` / `throttle` / `prompt` / `deny`). Fail-open by default; opt-in fail-closed with `--agent0waste-bypass` override. macOS-only. |
 | 5 — Sandbox | wired, experimental (v0.4.3) | `sandbox-exec` wrapper with deny-default SBPL profile. macOS-only. Validate before relying on it. |
 
 See [`docs/roadmap.md`](docs/roadmap.md) for the full plan. Note that the
