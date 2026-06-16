@@ -31,7 +31,8 @@ cargo test
 - Real data collection
 - Clean reporting
 
-Linux and Windows support are planned for **v2**.
+Linux and Windows support are planned. See
+[`docs/roadmap.md`](docs/roadmap.md) for the current timeline.
 
 ## Code Style
 
