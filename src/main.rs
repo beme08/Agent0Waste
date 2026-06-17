@@ -15,6 +15,8 @@ mod macos;
 mod permission;
 mod pricing;
 mod report;
+#[cfg(feature = "bench")]
+mod bench;
 mod run;
 mod sandbox;
 mod sessions;
@@ -103,6 +105,13 @@ fn main() {
         }
         Some(Commands::Intercept { action }) => {
             run_intercept(action);
+        }
+        #[cfg(feature = "bench")]
+        Some(Commands::Bench { action }) => {
+            if let Err(e) = crate::bench::dispatch(&action) {
+                eprintln!("agent0waste: {e}");
+                std::process::exit(1);
+            }
         }
         None => {
             // Default: run a scan
@@ -195,6 +204,12 @@ enum Commands {
         /// List models with no pricing entry (and a TOML snippet).
         #[arg(long, default_value_t = false)]
         missing: bool,
+    },
+    /// Layer 6: benchmark an inference server (vLLM / SGLang / baseline)
+    #[cfg(feature = "bench")]
+    Bench {
+        #[command(subcommand)]
+        action: crate::bench::BenchCmd,
     },
 }
 

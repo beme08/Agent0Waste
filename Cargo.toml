@@ -1,14 +1,28 @@
 [package]
 name = "agent0waste"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 authors = ["beme08"]
-description = "Local-first waste scanner for AI agent CLIs (Hermes, Claude Code, etc.)"
+description = "Local-first waste scanner for AI agent CLIs (Hermes, Claude Code, etc.) + Layer 6 inference benchmark"
 license = "MIT"
 repository = "https://github.com/beme08/Agent0Waste"
 readme = "README.md"
-keywords = ["ai", "agents", "cli", "local", "privacy"]
+keywords = ["ai", "agents", "cli", "local", "privacy", "benchmark", "vllm", "sglang"]
 categories = ["command-line-utilities", "development-tools"]
+
+[features]
+# Default build ships the existing 5 layers without the heavy HTTP runtime.
+# `cargo build --release --features bench` enables Layer 6 (bench subcommand).
+default = []
+bench = [
+    "dep:reqwest",
+    "dep:tokio",
+    "dep:csv",
+    "dep:humantime",
+    "dep:parking_lot",
+    "dep:rand",
+    "dep:futures-util",
+]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -20,4 +34,20 @@ toml = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# Optional: Layer 6 (Systems Profiler & Benchmark) runtime deps.
+# These are only compiled when the `bench` feature is enabled, so the default
+# `cargo install` binary stays lean. v0.6 keeps the `bench` feature minimal:
+# no MLX, no Metal, no CUDA. v0.7 may add a custom-kernel slot.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"], optional = true }
+csv = { version = "1", optional = true }
+humantime = { version = "2", optional = true }
+parking_lot = { version = "0.12", optional = true }
+rand = { version = "0.8", optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
+
 [dev-dependencies]
+# wiremock is only compiled under --features bench, so it's gated in the
+# bench module's own cfg. We keep it unconditional in [dev-dependencies]
+# because dev-deps cannot be optional in Cargo.
+wiremock = "0.6"
