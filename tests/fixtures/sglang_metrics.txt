@@ -1,0 +1,9 @@
+# SGLang fixture: shares many vLLM-style names in SGLang 0.3+ but not all.
+# HELP vllm:gpu_cache_usage_perc SGLang reuses vLLM's metric name
+# TYPE vllm:gpu_cache_usage_perc gauge
+vllm:gpu_cache_usage_perc 0.41
+# HELP vllm:request_success_total Successful requests
+# TYPE vllm:request_success_total counter
+vllm:request_success_total 567
+# Intentionally missing: no DCGM_FI_DEV_GPU_UTIL in this scrape — the
+# gpu_underutilization axis will be null for this target.

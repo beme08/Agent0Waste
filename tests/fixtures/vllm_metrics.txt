@@ -1,0 +1,27 @@
+# HELP vllm:gpu_cache_usage_perc GPU KV-cache usage. 1.0 = 100%
+# TYPE vllm:gpu_cache_usage_perc gauge
+vllm:gpu_cache_usage_perc 0.62
+# HELP vllm:cpu_cache_usage_perc CPU KV-cache usage when swapping is enabled
+# TYPE vllm:cpu_cache_usage_perc gauge
+vllm:cpu_cache_usage_perc 0.0
+# HELP vllm:num_requests_swapped Requests swapped to CPU cache
+# TYPE vllm:num_requests_swapped gauge
+vllm:num_requests_swapped 0
+# HELP vllm:request_success_total Count of successful requests
+# TYPE vllm:request_success_total counter
+vllm:request_success_total{model="meta-llama/Meta-Llama-3-8B-Instruct"} 1234
+# HELP vllm:generation_tokens_total Total generation tokens
+# TYPE vllm:generation_tokens_total counter
+vllm:generation_tokens_total{model="meta-llama/Meta-Llama-3-8B-Instruct"} 98765
+# HELP vllm:time_to_first_token_seconds Time to first token histogram
+# TYPE vllm:time_to_first_token_seconds histogram
+vllm:time_to_first_token_seconds_bucket{le="0.01"} 50
+vllm:time_to_first_token_seconds_bucket{le="0.05"} 320
+vllm:time_to_first_token_seconds_bucket{le="0.1"} 800
+vllm:time_to_first_token_seconds_bucket{le="0.5"} 1100
+vllm:time_to_first_token_seconds_bucket{le="+Inf"} 1234
+# DCGM exporter
+# HELP DCGM_FI_DEV_GPU_UTIL GPU utilization (percent)
+# TYPE DCGM_FI_DEV_GPU_UTIL gauge
+DCGM_FI_DEV_GPU_UTIL{gpu="0",UUID="GPU-deadbeef"} 78
+DCGM_FI_DEV_GPU_UTIL{gpu="1",UUID="GPU-deadbeef"} 75

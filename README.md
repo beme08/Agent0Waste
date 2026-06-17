@@ -285,6 +285,7 @@ delta.
 | 3 — Heuristics | shipped (v0.3.1) | `cache_bloat`, `prompt_growth`, `auto_routing`, `model_instability` findings |
 | 4 — Interception | shipped (v0.5.0) | Per-command shim (`allow` / `throttle` / `prompt` / `deny`). Fail-open by default; opt-in fail-closed with `--agent0waste-bypass` override. macOS-only. |
 | 5 — Sandbox | wired, experimental (v0.4.3) | `sandbox-exec` wrapper with deny-default SBPL profile. macOS-only. Validate before relying on it. |
+| 6 — Systems Profiler | shipped (v0.6.0, `--features bench`) | Benchmark OpenAI-compatible inference servers (vLLM / SGLang / baseline). JSON + CSV report with a 0–100 `waste_score` (lower is better). See [`docs/bench-recipes.md`](docs/bench-recipes.md). |
 
 See [`docs/roadmap.md`](docs/roadmap.md) for the full plan. Note that the
 roadmap and the per-version design docs don't always agree on what each
@@ -292,11 +293,48 @@ milestone covers — the per-version design docs (e.g.
 [`docs/v0.5.0-design.md`](docs/v0.5.0-design.md)) are the source of truth
 for what's actually being built.
 
+### Layer 6 — Bench quickstart
+
+Layer 6 is gated behind a cargo feature so the default `cargo install`
+binary stays lean. Build with `--features bench` to enable it:
+
+```bash
+cargo install --git https://github.com/beme08/Agent0Waste --features bench
+# or, from a local clone:
+cargo build --release --features bench
+```
+
+Then point it at a running OpenAI-compatible server:
+
+```bash
+# vLLM remote
+agent0waste bench run vllm   --base-url http://gpu-box:8000   --model meta-llama/Meta-Llama-3-8B-Instruct   --concurrency 1,4,16,32   --num-requests 100   --scrape-metrics   --output bench-vllm.json   --csv bench-vllm.csv
+
+# Render the report as a markdown table
+agent0waste bench report bench-vllm.json
+```
+
+The waste score is **lower is better**. 0 = no detectable waste on the
+measured axes; 100 = every available axis is fully saturated. The
+existing "efficiency / if-cleaned delta" framing becomes
+`efficiency = 100 - waste_score`.
+
+Privacy stance: no data leaves your device *unless you point `bench` at
+a remote server*. v0.6 ships the `vllm` / `sglang` / `baseline` targets.
+MLX / oMLX Apple Silicon is a v0.7 deliverable. See
+[`docs/v0.6-bench-design.md`](docs/v0.6-bench-design.md) for the full
+scope.
+
 ### What's next
 
 - **Layer 5 sandbox hardening** — fix the `validate-sandbox` smoke-test
   failure observed on some macOS versions, scope the network policy to
   LLM provider hosts.
+- **v0.6.1 — cache pricing + heuristic expansion** — see
+  [`docs/roadmap.md`](docs/roadmap.md).
+- **v0.7 — MLX / oMLX Apple Silicon backend** — first-class
+  `mlx-lm` target, local Mac benchmarking recipe, optional
+  custom-kernel slot.
 - **Cross-platform** — Linux and Windows support. The `run` wrapper and
   heuristic engine are already cross-platform; the macOS-specific bits
   (scanner, sandbox-exec, intercept shim) need feature flags. Target
