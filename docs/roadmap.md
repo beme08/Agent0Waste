@@ -13,10 +13,13 @@ We follow semver because the CLI is installable.
 
 ---
 
-## The four layers
+## The layers
 
-Agent0Waste is built in four layers. Each layer is independently useful
-and ships in order.
+Agent0Waste is built in layers. Each layer is independently useful and
+ships in order. Layers 1–5 are local-first config / token / execution
+audit. Layer 6 is the inference systems profiler — it doesn't consume
+the previous layers, it sits beside them and is gated behind a cargo
+feature.
 
 | Layer | Name           | Output                                | Ships in |
 |-------|----------------|---------------------------------------|----------|
@@ -25,12 +28,16 @@ and ships in order.
 | 3     | Heuristics     | "What's about to become wasteful"     | v0.3.0 |
 | 4     | Interception   | "Block wasteful calls before they run" | v0.4.0 |
 | 5     | Sandbox (opt-in) | "Restrict what the binary can touch" | v0.4.3 (experimental) |
+| 6     | Systems Profiler | "How is the inference server doing?" | v0.6.0 (`--features bench`) |
 
-Each layer **consumes** the previous layer. Layer 2 reads SessionRecords
-that Layer 1 would never have produced. Layer 3 reads cost data from
-Layer 2 to spot trending waste. Layer 4 hooks into the model provider
-to enforce what Layer 3 suggests. Layer 5 wraps the real binary in
-`sandbox-exec` after the Layer 4 decision.
+Each of Layers 1–5 **consumes** the previous layer. Layer 2 reads
+SessionRecords that Layer 1 would never have produced. Layer 3 reads
+cost data from Layer 2 to spot trending waste. Layer 4 hooks into the
+model provider to enforce what Layer 3 suggests. Layer 5 wraps the real
+binary in `sandbox-exec` after the Layer 4 decision. Layer 6 sits
+alongside: it talks to whatever inference server the user points it at
+and reports throughput, latency, KV cache pressure, and a 0–100 waste
+score.
 
 ---
 
@@ -330,34 +337,85 @@ where `$HOME` doesn't match the templated literal.
 `validate-sandbox hermes` failure I observed during PR #14
 testing is the trigger. ~1 day of code work.
 
-### v0.6.0 — Cache pricing + local LLM proxy + heuristic expansion (medium)
+### v0.6.0 (Layer 6: Systems Profiler & Benchmark) — Shipped 2026-06-17
 
-> "Price the cache, run the proxy locally, expand the heuristics."
+> "Measure, don't modify."
 
-The original roadmap called this "Cache pricing + better heuristics"
-and treated the local LLM proxy as v0.4.1 work. The proxy was
-deferred past v0.4.1 (issue #6) and is now scoped to v0.6.0+
-alongside the cache-pricing and heuristic-expansion work.
+Extends the existing five layers with a new **Layer 6** that benchmarks
+OpenAI-compatible inference servers (vLLM, SGLang, or any compatible
+endpoint) and emits a JSON + CSV report with an explainable 0–100
+`waste_score` (lower is better).
+
+- **Three first-class targets**: `vllm`, `sglang`, `baseline`. The
+  `baseline` target is for TGI, llama.cpp server, or any other
+  OpenAI-compatible endpoint; it does client-side measurements only.
+- **Swept-concurrency chat-completion load** — default sweep is
+  `[1, 4, 16, 32]`, configurable via `--concurrency`. Each level gets
+  `--num-requests` requests, after a configurable warmup.
+- **Optional Prometheus `/metrics` scraping** at 1 Hz, stops cleanly
+  when the loadgen finishes. Missing series are reported as `null` —
+  no fabricated "hit rate".
+- **Waste score** with five axes (kv_cache_pressure,
+  gpu_underutilization, tail_latency, ttft_jitter, context_oversize),
+  proration over unavailable axes, monotonic in each axis
+  (verified by unit tests).
+- **No custom kernels. No first-class MLX / oMLX integration in
+  v0.6.** Both deferred to v0.7.
+- **`bench` cargo feature** gates the heavy HTTP runtime so the
+  default `cargo install` binary stays lean. The `bench` subcommand
+  errors out at runtime if the feature is not enabled.
+
+**Exit criteria:** met. `cargo test --features bench` is green
+(148 tests). `agent0waste bench run vllm` produces a JSON + CSV
+report end-to-end against a running server. The waste score is
+monotonically non-decreasing in any single axis.
+
+**First blog acceptance check:** two primary numbers — vLLM remote
+and SGLang remote — on Llama 3 8B, each clearly labelled with
+hardware config. Optional `baseline` appendix. No MLX result
+required for v0.6.
+
+See [`docs/v0.6-bench-design.md`](v0.6-bench-design.md) for the full
+scope and `docs/bench-recipes.md` for copy-pasteable commands.
+
+### v0.6.1 — Cache pricing + heuristic expansion (planned, smaller)
+
+> "Price the cache, expand the heuristics."
+
+The cache-pricing and heuristic-expansion work that was originally
+scoped for v0.6.0 is now v0.6.1. Layer 6 shipped first because the
+benchmark work unblocks the v0.7 MLX work and the upstream vLLM/SGLang
+findings conversation.
 
 - **Cache pricing** — add `cache_input` and `cache_output` rate
-  columns to the pricing table. Anthropic charges 10% of input
-  for cache reads; xAI varies. The cost report will surface
-  cache spend separately from regular token spend.
-- **Local LLM proxy (Mechanism B)** — the `run --` wrapper
-  becomes a real proxy: intercept the LLM call, apply heuristics,
-  optionally route to a cheaper model. Architecture TBD
-  (`docs/v0.6.0-design.md` does not exist yet).
+  columns to the pricing table. Anthropic charges 10% of input for
+  cache reads; xAI varies. The cost report will surface cache spend
+  separately from regular token spend.
 - **Heuristic expansion** — detect when a model is run on a free
-  tier that *also* has a paid variant the user has paid for
-  (flag the downgrade). Detect when session duration grows > 2x
+  tier that *also* has a paid variant the user has paid for (flag
+  the downgrade). Detect when session duration grows > 2x
   week-over-week on the same (model, source). Detect first-of-day
   "warmup" sessions that are unusually large vs mid-day sessions.
-- **`intercept` daemon mode** (or process-attached listening
-  socket) becomes possible once the proxy is in place.
 
-**Exit criteria:** cache tokens are priced; 7+ heuristics; the
-local LLM proxy is functional on macOS with the existing
-heuristic engine. Cross-platform support (Linux/Windows) lands
+### v0.7 — Apple Silicon / MLX backend (planned)
+
+> "First-class Apple Silicon profiling, local Mac benchmarking."
+
+**Not shipped in v0.6.** The v0.7 scope:
+
+- **First-class `mlx-lm` / oMLX Apple Silicon target** — a new
+  `Target` impl that talks to mlx-lm's OpenAI-compatible server.
+  The `Target` trait in v0.6 is shaped so this is a single-file
+  change.
+- **Local Mac benchmarking recipe** — copy-pasteable commands for
+  benchmarking mlx-lm on the developer's own machine, with richer
+  local hardware counters (Metal / `powermetrics`) where available.
+- **Optional custom-kernel slot** — a future kernel backend could
+  attach kernel-specific counters via the `Target` trait. Not
+  required for v0.7; may land later.
+- **Upstream PRs to vLLM / SGLang** with findings from v0.6 numbers.
+
+
 in the same milestone.
 
 **Cross-platform (deferred from the original v0.5.0 framing):**
