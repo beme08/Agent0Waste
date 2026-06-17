@@ -309,7 +309,7 @@ for what's actually being built.
 
 Privacy-first. Local-only. No telemetry. No accounts.
 
-If it can't run offline, it doesn't belong here.
+
 
 ---
 
