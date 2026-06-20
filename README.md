@@ -2,7 +2,7 @@
 
 > Local-first waste scanner for AI agent CLIs — Hermes, Claude Code, OpenCode, and more.
 >
-> v0.5.0 · **macOS-only** · Linux/Windows on the roadmap
+> v0.6.0 · **macOS-only** · Linux/Windows on the roadmap
 
 Shows exactly what is wasting RAM, disk space, and tokens on your machine —
 with **zero data leaving your device**.
@@ -57,7 +57,7 @@ cargo install --git https://github.com/beme08/Agent0Waste agent0waste
 ```
 
 Works as soon as you clone the source. No `crates.io` publish yet — that
-gates on the cross-platform work in the v0.5.0+ milestone.
+gates on the cross-platform work in the v0.6.0+ milestone.
 
 ### From source
 

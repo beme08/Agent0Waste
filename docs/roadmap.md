@@ -308,10 +308,10 @@ manifest-string progression).
   default rules use `cache_ttl_s = 30`. The change matters only
   for users who ship custom rules with different TTLs.
 
-**Status:** design locked; issue #10 open. Code change is
-~50 lines in `src/main.rs` + 3 unit tests in `src/intercept.rs` +
-1 unit test in `src/cache.rs` + a `docs/validation.md` v0.5.1
-section. No schema change to the cache file.
+**Status:** design locked; issue #10 open. Code change is a
+small edit in `src/main.rs` (dispatch glue) plus per-rule TTL tests
+in `src/intercept.rs` and `src/cache.rs`, and a `docs/validation.md`
+v0.5.1 section. No schema change to the cache file.
 
 ### v0.5.2 (Layer 5 path fix) — Planned
 
@@ -366,7 +366,7 @@ endpoint) and emits a JSON + CSV report with an explainable 0–100
   errors out at runtime if the feature is not enabled.
 
 **Exit criteria:** met. `cargo test --features bench` is green
-(148 tests). `agent0waste bench run vllm` produces a JSON + CSV
+(147 tests). `agent0waste bench run vllm` produces a JSON + CSV
 report end-to-end against a running server. The waste score is
 monotonically non-decreasing in any single axis.
 
