@@ -153,7 +153,7 @@ pub fn missing_models(sessions: &[HermesSession], pricing: &Pricing) -> Vec<Miss
         entry.sources.insert(s.source.clone());
     }
     let mut out: Vec<MissingModel> = by_model.into_values().collect();
-    out.sort_by(|a, b| b.input_tokens.cmp(&a.input_tokens));
+    out.sort_by_key(|b| std::cmp::Reverse(b.input_tokens));
     out
 }
 

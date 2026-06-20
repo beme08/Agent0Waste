@@ -313,7 +313,7 @@ output = 2.00
         let defaults = default_rates();
         let override_rate: ModelRate = ModelRate { input: 1.0, output: 1.0 };
         let name = "gpt-4o".to_string(); // exists in defaults
-        assert!(defaults.get(&name).is_some(), "gpt-4o must be in defaults for this test");
+        assert!(defaults.contains_key(&name), "gpt-4o must be in defaults for this test");
         let _ = override_rate; // silence
     }
 }

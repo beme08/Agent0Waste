@@ -45,6 +45,7 @@ pub struct Report {
 impl Report {
     pub fn new() -> Self { Self::default() }
     pub fn push(&mut self, f: Finding) { self.findings.push(f); }
+    #[allow(dead_code)] // consumed by #[cfg(test)] callers only
     pub fn is_empty(&self) -> bool { self.findings.is_empty() }
 
     /// Render as a human-readable block.

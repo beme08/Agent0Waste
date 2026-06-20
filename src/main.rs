@@ -356,8 +356,8 @@ fn show_history() {
             hist.entries.len()
         );
         println!(
-            "{:<22} {:>4}  {:>3}p  {:>3}w  {}",
-            "Time", "Eff%", "Prf", "Wst", "Model"
+            "{:<22} {:>4}  {:>3}p  {:>3}w  Model",
+            "Time", "Eff%", "Prf", "Wst"
         );
         for e in &hist.entries {
             println!(
@@ -1275,6 +1275,7 @@ enum CacheLookupOutcome {
 
 #[derive(Debug)]
 enum CacheStoreOutcome {
+    #[allow(dead_code)] // emitted by the cache-write path; reserved for a future trace shape
     Written { ttl_s: u64 },
     Skipped { reason: String },
 }
@@ -1291,6 +1292,7 @@ struct TraceTimings {
 #[derive(Debug)]
 struct Trace {
     command: String,
+    #[allow(dead_code)] // reserved for a time-windowed trace view (v0.6.1)
     since_days: i64,
     load: LoadOutcome,
     cache_lookup: CacheLookupOutcome,
@@ -1352,12 +1354,9 @@ fn run_intercept_trace(
         CacheLookupOutcome::NoMtime
     } else {
         let path = state_db_path.as_deref().unwrap();
+        let key = cache_key.as_deref().unwrap();
         let mtime = state_db_mtime(path);
-        if mtime.is_none() {
-            CacheLookupOutcome::NoMtime
-        } else {
-            let mtime = mtime.unwrap();
-            let key = cache_key.as_deref().unwrap();
+        if let Some(mtime) = mtime {
             let cache = cache::HeuristicCache::load();
             match cache.get(key, mtime) {
                 Some(_) => {
@@ -1372,6 +1371,8 @@ fn run_intercept_trace(
                     reason: "no entry or stale".to_string(),
                 },
             }
+        } else {
+            CacheLookupOutcome::NoMtime
         }
     };
     let t_cache = t_cache_start.elapsed();
@@ -1908,7 +1909,6 @@ fn extract_bypass_flag(args: &[&str]) -> (bool, Vec<String>) {
 ///   failure: silent — write error MUST NOT block the bypass
 fn log_bypass(real_binary: &str, args: &[&str]) {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
 
     let path = match std::env::var_os("AGENT0WASTE_BYPASS_LOG") {
         Some(p) => std::path::PathBuf::from(p),
@@ -2397,8 +2397,8 @@ fn run_sessions_list() {
     println!("Agent0Waste — Recorded Sessions ({} of {})\n", recs.len(), Sessions::DEFAULT_CAP);
     let id_w = recs.iter().map(|r| r.id.len()).max().unwrap_or(20).max(20);
     println!(
-        "{:<id_w$}  {:<19}  {:>5}  {:>9}  {:<24}  {}",
-        "id", "started", "exit", "duration", "model", "command"
+        "{:<id_w$}  {:<19}  {:>5}  {:>9}  {:<24}  command",
+        "id", "started", "exit", "duration", "model"
     );
     for r in &recs {
         let model = r.model.clone().unwrap_or_else(|| "-".to_string());

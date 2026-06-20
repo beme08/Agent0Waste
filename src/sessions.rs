@@ -1,7 +1,7 @@
 use crate::pricing::Pricing;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 /// One recorded session. Persisted to one file per session under
@@ -96,20 +96,11 @@ impl Sessions {
     }
 
     /// New storage at a custom path. Used by tests.
+    #[allow(dead_code)] // consumed by #[cfg(test)] callers only
     pub fn at(base: PathBuf) -> Self {
         let _ = std::fs::create_dir_all(&base);
         Self { base, cap: Self::DEFAULT_CAP }
     }
-
-    /// New storage at a custom path with a custom cap. Use this when
-    /// the user passes --cap N or --no-cap.
-    pub fn at_with_cap(base: PathBuf, cap: usize) -> Self {
-        let _ = std::fs::create_dir_all(&base);
-        Self { base, cap }
-    }
-
-    pub fn base(&self) -> &Path { &self.base }
-    pub fn cap(&self) -> usize { self.cap }
 
     /// Persist a record. Atomic write via temp file + rename. After
     /// writing, enforces the FIFO cap by deleting the oldest files.
@@ -137,7 +128,7 @@ impl Sessions {
                 .collect(),
             Err(_) => Vec::new(),
         };
-        recs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        recs.sort_by_key(|b| std::cmp::Reverse(b.started_at));
         recs
     }
 

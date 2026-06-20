@@ -1,4 +1,3 @@
-use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -39,42 +38,6 @@ impl History {
         if let Ok(json) = serde_json::to_string_pretty(self) {
             let _ = fs::write(&path, json);
         }
-    }
-
-    pub fn record(
-        &mut self,
-        efficiency: u32,
-        profiles_count: usize,
-        waste_count: usize,
-        model: &str,
-        waste_categories: Vec<String>,
-    ) {
-        let now: DateTime<Local> = Local::now();
-        self.entries.push(HistoryEntry {
-            timestamp: now.format("%Y-%m-%dT%H:%M:%S").to_string(),
-            efficiency,
-            profiles_count,
-            waste_count,
-            model: model.to_string(),
-            waste_categories,
-        });
-        // Keep last 100 entries
-        if self.entries.len() > 100 {
-            self.entries.drain(0..self.entries.len() - 100);
-        }
-        self.save();
-    }
-
-    pub fn show_trend(&self) -> Option<String> {
-        if self.entries.len() < 2 {
-            return None;
-        }
-        let recent = &self.entries[self.entries.len().saturating_sub(5)..];
-        let first = recent.first()?.efficiency;
-        let last = recent.last()?.efficiency;
-        let delta = last as i32 - first as i32;
-        let arrow = if delta > 0 { "↑" } else if delta < 0 { "↓" } else { "→" };
-        Some(format!("{}{} (last {} scans)", arrow, delta.abs(), recent.len()))
     }
 }
 

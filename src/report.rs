@@ -15,7 +15,7 @@ pub fn print_report(result: &ScanResult) {
     if !result.hermes_profiles.is_empty() {
         println!("Hermes profiles ({}):", result.hermes_profiles.len());
         for p in &result.hermes_profiles {
-            let expensive = if p.expensive_tools.len() > 0 {
+            let expensive = if !p.expensive_tools.is_empty() {
                 format!("{} expensive", p.expensive_tools.len())
             } else {
                 "clean".to_string()

@@ -1,16 +1,13 @@
 use crate::sessions::{SessionRecord, Sessions};
 use chrono::Utc;
 use std::io::Read;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-/// Exit codes reserved for our own use. These match common conventions
-/// so that `agent0waste run` itself is shell-script-friendly.
-pub const EXIT_OK: i32 = 0;
+/// Exit codes reserved for our own use. `EXIT_BAD_ARGS` is used elsewhere;
+/// the others match common shell conventions so `agent0waste run` is
+/// shell-script-friendly if we add them later.
 pub const EXIT_BAD_ARGS: i32 = 64;
-pub const EXIT_RUNTIME_ERR: i32 = 70;
-pub const EXIT_IO_ERR: i32 = 74;
 
 const STDERR_TAIL_BYTES: usize = 2048;
 const STDERR_TAIL_KEEP: usize = 500;
@@ -157,11 +154,6 @@ pub fn split_run_args(argv: &[String]) -> Result<(String, Vec<String>), String> 
         return Err("no command given after `--`".to_string());
     }
     Ok((after[0].clone(), after[1..].to_vec()))
-}
-
-/// Path helper for the sessions dir — used by `agent0waste sessions list`.
-pub fn sessions_path() -> PathBuf {
-    Sessions::new().base().to_path_buf()
 }
 
 #[cfg(test)]
