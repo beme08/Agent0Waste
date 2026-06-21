@@ -378,24 +378,50 @@ required for v0.6.
 See [`docs/v0.6-bench-design.md`](v0.6-bench-design.md) for the full
 scope and `docs/bench-recipes.md` for copy-pasteable commands.
 
-### v0.6.1 — Cache pricing + heuristic expansion (planned, smaller)
+### v0.6.1 — Cache pricing (shipped 2026-06-21)
 
-> "Price the cache, expand the heuristics."
+> "Price the cache."
 
-The cache-pricing and heuristic-expansion work that was originally
-scoped for v0.6.0 is now v0.6.1. Layer 6 shipped first because the
-benchmark work unblocks the v0.7 MLX work and the upstream vLLM/SGLang
-findings conversation.
+**Cache pricing shipped in v0.6.1. Heuristic expansion split out to
+v0.6.2.** The two were originally bundled in the v0.6.1 milestone; the
+pricing work landed first because the cost report understates spend
+by 20-40% for users with heavy cache reuse.
 
-- **Cache pricing** — add `cache_input` and `cache_output` rate
-  columns to the pricing table. Anthropic charges 10% of input for
-  cache reads; xAI varies. The cost report will surface cache spend
-  separately from regular token spend.
-- **Heuristic expansion** — detect when a model is run on a free
-  tier that *also* has a paid variant the user has paid for (flag
-  the downgrade). Detect when session duration grows > 2x
-  week-over-week on the same (model, source). Detect first-of-day
-  "warmup" sessions that are unusually large vs mid-day sessions.
+- **`Rate` is now a 4-tuple** `(input, output, cache_input, cache_output)`,
+  all in USD per 1M tokens. `cache_output` is 0 across the default
+  rates (cache writes are free on every major provider).
+- **`Pricing::cost()` returns `CostBreakdown { regular, cache }`**
+  instead of a single `f64`. The `regular` cost is input + output;
+  the `cache` cost is cache reads.
+- **`CostRow` gains `cache_cost_usd`**. The `format_table` output
+  gains a `cache_$` column. The TOTAL row sums both cost columns.
+- **TOML schema** accepts both 2-field and 4-field override files.
+  Old 2-field files (`input`, `output` only) keep working unchanged;
+  cache rates default to 0.0 for any model with a legacy override.
+- **Default cache rates** populated for all 44 built-in models using
+  known public pricing: Anthropic 10% of input, OpenAI 50% on
+  GPT-4o/4-turbo and 25% on GPT-4.1/5, xAI 50% on paid tiers,
+  DeepSeek 10%, Google Gemini 0 (free as of 2026-06), Mistral ~25%,
+  most free-tier models 0.
+- **Exit criteria:** met. 5 new unit tests, 101 total default
+  tests pass, 152 with `--features bench`. `cargo clippy
+  --all-targets -- -D warnings` clean. Backwards compatible with
+  every existing user `pricing.toml`.
+
+### v0.6.2 — Heuristic expansion (planned, split from v0.6.1)
+
+> "Detect downgrade, session-duration growth, first-of-day warmup."
+
+Originally bundled with cache pricing in v0.6.1; split out to keep
+the cache-pricing PR small and reviewable.
+
+- **Free-tier downgrade detection** — flag when a model is run on a
+  free tier that *also* has a paid variant the user has paid for
+  (the user is paying for a paid tier but the model name says `:free`).
+- **Session-duration growth** — detect when session duration grows
+  > 2x week-over-week on the same (model, source).
+- **First-of-day warmup** — detect unusually large warmup sessions
+  at the start of each day vs mid-day sessions.
 
 ### v0.7 — Apple Silicon / MLX backend (planned)
 

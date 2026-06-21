@@ -134,10 +134,14 @@ impl Sessions {
 
     /// Apply cost to a record using a Pricing table. Mutates and returns
     /// the same record. No-op if cost is already set or if model is unknown.
+    ///
+    /// Local `SessionRecord`s don't carry cache tokens (cache fields live
+    /// on `HermesSession`), so we pass 0 for cache_read_tokens. The
+    /// returned `regular` cost is stored on the record.
     pub fn apply_cost(rec: &mut SessionRecord, pricing: &Pricing) {
         if rec.cost_usd.is_some() { return; }
         if let (Some(model), Some(in_t), Some(out_t)) = (&rec.model, rec.input_tokens, rec.output_tokens) {
-            rec.cost_usd = pricing.cost(model, in_t, out_t);
+            rec.cost_usd = pricing.cost(model, in_t, out_t, 0).map(|c| c.regular);
         }
     }
 

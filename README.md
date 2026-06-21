@@ -281,7 +281,7 @@ delta.
 | Layer | Status | What it does |
 |-------|--------|--------------|
 | 1 — Audit | shipped (v0.1) | Scan for config bloat, tool waste, memory pressure, model awareness |
-| 2 — Accounting | shipped (v0.2.1) | Per-tool / per-model / per-session token tracking + cost estimation from `state.db` |
+| 2 — Accounting | shipped (v0.2.1; cache pricing in v0.6.1) | Per-tool / per-model / per-session token tracking + cost estimation from `state.db`. v0.6.1 prices cache reads (Anthropic 10% of input, OpenAI 50% on GPT-4o) as a separate `cache_$` column. |
 | 3 — Heuristics | shipped (v0.3.1) | `cache_bloat`, `prompt_growth`, `auto_routing`, `model_instability` findings |
 | 4 — Interception | shipped (v0.5.0) | Per-command shim (`allow` / `throttle` / `prompt` / `deny`). Fail-open by default; opt-in fail-closed with `--agent0waste-bypass` override. macOS-only. |
 | 5 — Sandbox | wired, experimental (v0.4.3) | `sandbox-exec` wrapper with deny-default SBPL profile. macOS-only. Validate before relying on it. |
