@@ -64,21 +64,12 @@ pub const DEFAULT_HERMES_PROFILE: &str = r#"(version 1)
 "#;
 
 /// Per-binary sandbox settings. In `intercept.toml` as `[sandbox.<cmd>]`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SandboxEntry {
     pub enabled: bool,
     /// Path to the SBPL profile. If `None`, defaults to
     /// `~/.config/agent0waste/sandbox/<cmd>.sb`.
     pub profile: Option<PathBuf>,
-}
-
-impl Default for SandboxEntry {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            profile: None,
-        }
-    }
 }
 
 /// Top-level sandbox config from `intercept.toml`. Per-binary map
@@ -118,7 +109,7 @@ impl SandboxConfig {
             let profile = t
                 .get("profile")
                 .and_then(|v| v.as_str())
-                .map(|s| expand_home(s));
+                .map(expand_home);
             let entry = SandboxEntry { enabled, profile };
             out.entries.insert(key.clone(), entry);
         }
@@ -208,8 +199,10 @@ pub fn write_default_profile(command: &str) -> Result<ProfileWriteOutcome, Strin
 /// `/bin/true` (used by `validate-sandbox`).
 #[derive(Debug, Clone)]
 pub struct ProfileValidation {
+    #[allow(dead_code)] // not surfaced by the current `validate-sandbox` print path
     pub profile_path: PathBuf,
     pub ok: bool,
+    #[allow(dead_code)] // reserved for a future `validate-sandbox --show-output` flag
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
@@ -256,6 +249,7 @@ pub enum SandboxStatus {
     /// Sandbox entry exists but the profile file is missing.
     ProfileMissing { profile: PathBuf },
     /// Non-macOS host (sandbox-exec unavailable). Always fail-open.
+    #[allow(dead_code)] // emitted on Linux/Windows when SBPL is unavailable (see docs/roadmap.md)
     UnsupportedHost,
     /// `/usr/bin/sandbox-exec` binary not found.
     SandboxExecMissing,

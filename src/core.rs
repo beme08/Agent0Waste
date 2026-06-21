@@ -92,19 +92,19 @@ pub fn scan_hermes() -> Vec<ProfileInfo> {
 /// Known model context windows (tokens). Extend as needed.
 pub(crate) fn model_context_window(name: &str) -> u32 {
     let n = name.to_lowercase();
-    if n.contains("qwen2.5") || n.contains("qwen-2.5") {
-        128000
-    } else if n.contains("claude-3-5") || n.contains("claude-3.5") {
+    if n.contains("claude-3") {
+        // claude-3, claude-3-5, claude-3.5 all share 200k context
         200000
-    } else if n.contains("claude-3") {
-        200000
-    } else if n.contains("gpt-4o") || n.contains("gpt-4-turbo") {
-        128000
-    } else if n.contains("llama3.1") || n.contains("llama-3.1") {
-        128000
-    } else if n.contains("grok") {
-        128000
-    } else if n.contains("mistral") || n.contains("mixtral") {
+    } else if n.contains("qwen2.5")
+        || n.contains("qwen-2.5")
+        || n.contains("gpt-4o")
+        || n.contains("gpt-4-turbo")
+        || n.contains("llama3.1")
+        || n.contains("llama-3.1")
+        || n.contains("grok")
+        || n.contains("mistral")
+        || n.contains("mixtral")
+    {
         128000
     } else {
         8192 // safe default

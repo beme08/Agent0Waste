@@ -1,8 +1,15 @@
+// Reserved permission gate. The intent (see SECURITY.md and AGENTS.md) is
+// that every file reader consults `Permission` before touching disk; the
+// actual integration is tracked in the v0.7+ roadmap because the current
+// scan code paths run as a single-developer tool on the developer's own
+// machine. The types live here so the gate is ready to wire in without
+// a large refactor.
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct Permission {
-    #[allow(dead_code)]
     pub allow_hardware: bool,
     pub allow_config: bool,
     pub allow_sessions: bool,

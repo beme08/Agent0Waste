@@ -204,7 +204,9 @@ fn json_str(s: &str) -> String {
 pub struct CheckHint {
     pub model: Option<String>,
     pub tokens: Option<u64>,
+    #[allow(dead_code)] // forward-compat: see struct doc — future versions may weight decision by source
     pub command: Option<String>,
+    #[allow(dead_code)] // forward-compat: see struct doc — future versions may weight decision by source
     pub source: Option<String>,
 }
 
@@ -1148,7 +1150,7 @@ cooldown_s = 10
         // When that rule fires, the wrapper should deny.
         let mut report = Report::default();
         report.findings.push(heuristics::Finding {
-            id: "prompt_growth".into(),
+            id: "prompt_growth",
             severity: Severity::Warn,
             key: "test-group".into(),
             message: "prompt grew 1.8x".into(),

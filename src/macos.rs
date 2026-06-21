@@ -29,17 +29,6 @@ impl MacOSScanner {
         fs::read_dir(path).map(|d| d.count()).unwrap_or(0)
     }
 
-    pub fn count_hermes_crons(&self) -> usize {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let path = format!("{}/.hermes/cron", home);
-        fs::read_dir(path)
-            .map(|d| d.filter_map(|e| e.ok()).count())
-            .unwrap_or(0)
-    }
-
-
-
-
 
     pub fn count_kanban_boards(&self) -> u32 {
         let home = std::env::var("HOME").unwrap_or_default();

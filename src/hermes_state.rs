@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 /// We expose only the fields relevant to waste accounting; the rest
 /// stays in Hermes.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // fields aligned with Hermes state.db schema; cache_write/reasoning/message/tool populated in v0.6.1 (see docs/roadmap.md)
 pub struct HermesSession {
     pub id: String,
     pub model: String,
@@ -31,16 +32,6 @@ pub struct HermesSession {
     pub reasoning_tokens: u64,
     pub message_count: u32,
     pub tool_call_count: u32,
-}
-
-impl HermesSession {
-    /// Total tokens billed (input + output, ignoring cache). Matches
-    /// the way most providers bill: cache reads are cheap (often 10%
-    /// of input) but the *full* input gets reported. We expose raw
-    /// numbers and let cost.rs decide what to do.
-    pub fn total_billed(&self) -> u64 {
-        self.input_tokens + self.output_tokens
-    }
 }
 
 /// Default path to Hermes' state database.
@@ -166,15 +157,4 @@ mod tests {
         assert!(recs.is_empty());
     }
 
-    #[test]
-    fn total_billed_sums_input_and_output() {
-        let s = HermesSession {
-            id: "x".into(), model: "gpt-4o".into(), source: "cli".into(),
-            started_at: Utc::now(), ended_at: None,
-            input_tokens: 100, output_tokens: 50,
-            cache_read_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0,
-            message_count: 0, tool_call_count: 0,
-        };
-        assert_eq!(s.total_billed(), 150);
-    }
 }
