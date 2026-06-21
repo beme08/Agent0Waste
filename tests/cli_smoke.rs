@@ -46,8 +46,8 @@ fn version_prints_cargo_version() {
     assert_exit_zero(&out, "--version should exit 0");
     let s = stdout(&out);
     assert!(
-        s.contains("agent0waste") && s.contains("0.6.0"),
-        "--version output should be 'agent0waste 0.6.0'-shaped, got: {:?}",
+        s.contains("agent0waste") && s.contains("0.6.1"),
+        "--version output should be 'agent0waste 0.6.1'-shaped, got: {:?}",
         s
     );
 }

@@ -9,8 +9,13 @@ use std::collections::HashMap;
 pub struct CostRow {
     /// Group key (model name, tool name, etc.) or "*" for the grand total.
     pub key: String,
-    /// Sum of cost_usd across all sessions in this group.
+    /// Sum of `regular` cost (input + output) across all sessions in
+    /// this group, in USD. (v0.6.1 split out cache cost; this field
+    /// is now `regular` only, with `cache_cost_usd` below.)
     pub cost_usd: f64,
+    /// Sum of `cache` cost (cache-read tokens) across all sessions in
+    /// this group, in USD. v0.6.1.
+    pub cache_cost_usd: f64,
     /// Number of sessions in this group.
     pub sessions: usize,
     /// Sum of input tokens (when known).
@@ -63,6 +68,7 @@ pub fn report(
         let row = rows.entry(key.clone()).or_insert(CostRow {
             key,
             cost_usd: 0.0,
+            cache_cost_usd: 0.0,
             sessions: 0,
             input_tokens: 0,
             output_tokens: 0,
@@ -99,8 +105,8 @@ pub fn report_hermes(
         // stripped, so "openrouter/owl-alpha" doesn't need a literal
         // key — but if the user has "owl-alpha" in pricing.toml it works.
         let short = s.model.rsplit('/').next().unwrap_or(&s.model).to_string();
-        let cost = pricing.cost(&s.model, s.input_tokens, s.output_tokens)
-            .or_else(|| pricing.cost(&short, s.input_tokens, s.output_tokens));
+        let cost = pricing.cost(&s.model, s.input_tokens, s.output_tokens, s.cache_read_tokens)
+            .or_else(|| pricing.cost(&short, s.input_tokens, s.output_tokens, s.cache_read_tokens));
 
         let key = match group_by {
             GroupBy::Total => "*".to_string(),
@@ -111,12 +117,16 @@ pub fn report_hermes(
         let row = rows.entry(key.clone()).or_insert(CostRow {
             key,
             cost_usd: 0.0,
+            cache_cost_usd: 0.0,
             sessions: 0,
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
         });
-        row.cost_usd += cost.unwrap_or(0.0);
+        if let Some(c) = cost {
+            row.cost_usd += c.regular;
+            row.cache_cost_usd += c.cache;
+        }
         row.sessions += 1;
         row.input_tokens += s.input_tokens;
         row.output_tokens += s.output_tokens;
@@ -198,30 +208,32 @@ pub fn format_table(rows: &[CostRow]) -> String {
         return "no cost data — run `agent0waste run -- <cmd>` to record sessions\n".to_string();
     }
     let key_w = rows.iter().map(|r| r.key.len()).max().unwrap_or(8).max(8);
+    // 7 columns: key, cost_usd, cache_$, sessions, input_tok, output_tok, cache_tok
     let mut s = format!(
-        "{:<key_w$}  {:>10}  {:>8}  {:>12}  {:>12}  {:>12}\n",
-        "key", "cost_usd", "sessions", "input_tok", "output_tok", "cache_tok",
+        "{:<key_w$}  {:>10}  {:>8}  {:>8}  {:>12}  {:>12}  {:>12}\n",
+        "key", "cost_usd", "cache_$", "sessions", "input_tok", "output_tok", "cache_tok",
         key_w = key_w
     );
-    s.push_str(&"-".repeat(key_w + 70));
+    s.push_str(&"-".repeat(key_w + 78));
     s.push('\n');
     for r in rows {
         s.push_str(&format!(
-            "{:<key_w$}  ${:>9.4}  {:>8}  {:>12}  {:>12}  {:>12}\n",
-            r.key, r.cost_usd, r.sessions, r.input_tokens, r.output_tokens, r.cache_read_tokens,
+            "{:<key_w$}  ${:>9.4}  ${:>7.4}  {:>8}  {:>12}  {:>12}  {:>12}\n",
+            r.key, r.cost_usd, r.cache_cost_usd, r.sessions, r.input_tokens, r.output_tokens, r.cache_read_tokens,
             key_w = key_w
         ));
     }
     let total_cost: f64 = rows.iter().map(|r| r.cost_usd).sum();
+    let total_cache_cost: f64 = rows.iter().map(|r| r.cache_cost_usd).sum();
     let total_in: u64 = rows.iter().map(|r| r.input_tokens).sum();
     let total_out: u64 = rows.iter().map(|r| r.output_tokens).sum();
     let total_cache: u64 = rows.iter().map(|r| r.cache_read_tokens).sum();
     let total_sessions: usize = rows.iter().map(|r| r.sessions).sum();
-    s.push_str(&"-".repeat(key_w + 70));
+    s.push_str(&"-".repeat(key_w + 78));
     s.push('\n');
     s.push_str(&format!(
-        "{:<key_w$}  ${:>9.4}  {:>8}  {:>12}  {:>12}  {:>12}\n",
-        "TOTAL", total_cost, total_sessions, total_in, total_out, total_cache,
+        "{:<key_w$}  ${:>9.4}  ${:>7.4}  {:>8}  {:>12}  {:>12}  {:>12}\n",
+        "TOTAL", total_cost, total_cache_cost, total_sessions, total_in, total_out, total_cache,
         key_w = key_w
     ));
     s
@@ -312,6 +324,52 @@ mod tests {
     fn format_table_handles_empty() {
         let s = format_table(&[]);
         assert!(s.contains("no cost data"));
+    }
+
+    #[test]
+    fn format_table_renders_seven_columns() {
+        // v0.6.1: cost report has 7 columns: key, cost_usd, cache_$,
+        // sessions, input_tok, output_tok, cache_tok. Header must
+        // contain all four column labels.
+        let rows = vec![CostRow {
+            key: "gpt-4o".into(),
+            cost_usd: 1.2345,
+            cache_cost_usd: 0.1234,
+            sessions: 12,
+            input_tokens: 12345678,
+            output_tokens: 2345678,
+            cache_read_tokens: 9876543,
+        }];
+        let s = format_table(&rows);
+        for header in &["key", "cost_usd", "cache_$", "sessions", "input_tok", "output_tok", "cache_tok"] {
+            assert!(s.contains(header), "format_table header missing `{}`:
+{}", header, s);
+        }
+        // Body row must contain both cost values (rendered with a
+        // space: `$ 1.2345` rather than `$1.2345`).
+        assert!(s.contains("$   1.2345"), "regular cost not rendered:\n{}", s);
+        assert!(s.contains("$ 0.1234"), "cache cost not rendered:\n{}", s);
+    }
+
+    #[test]
+    fn cost_row_aggregates_cache_cost_independently() {
+        // Build two sessions for the same model with cache reads.
+        // CostRow should sum cost_usd from regular input/output AND
+        // sum cache_cost_usd from cache reads, separately.
+        let s1 = hermes("a", "gpt-4o", "openai", 1_000_000, 500_000, 1_000_000);
+        let s2 = hermes("b", "gpt-4o", "openai", 2_000_000, 1_000_000, 2_000_000);
+        let rows = report_hermes(&[s1, s2], &Pricing::default(), GroupBy::Model);
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        // gpt-4o: input 2.50, output 10.00, cache_input 1.25
+        // Regular: (3M * 2.50 + 1.5M * 10.00) / 1M = 7.50 + 15.00 = 22.50
+        // Cache: (3M * 1.25) / 1M = 3.75
+        assert!((r.cost_usd - 22.50).abs() < 1e-9, "regular cost wrong: {}", r.cost_usd);
+        assert!((r.cache_cost_usd - 3.75).abs() < 1e-9, "cache cost wrong: {}", r.cache_cost_usd);
+        assert_eq!(r.sessions, 2);
+        assert_eq!(r.input_tokens, 3_000_000);
+        assert_eq!(r.output_tokens, 1_500_000);
+        assert_eq!(r.cache_read_tokens, 3_000_000);
     }
 
     #[test]

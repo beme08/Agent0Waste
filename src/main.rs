@@ -977,7 +977,7 @@ fn run_pricing(action: &PricingAction) {
             println!("{:<48}  {:>10}  {:>10}", "model", "$/1M in", "$/1M out");
             println!("{}", "-".repeat(72));
             for n in &names {
-                if let Some((i, o)) = pricing.get(n) {
+                if let Some((i, o, _ci, _co)) = pricing.get(n) {
                     println!("{:<48}  ${:>9.4}  ${:>9.4}", n, i, o);
                 }
             }
@@ -1067,7 +1067,7 @@ fn run_pricing(action: &PricingAction) {
             }
             if !c.overlaps_with_default.is_empty() {
                 println!("\nshadows a default (overrides take precedence — verify you meant this):");
-                for (name, (in_r, out_r), (def_in, def_out)) in &c.overlaps_with_default {
+                for (name, (in_r, out_r, _ci, _co), (def_in, def_out, _dci, _dco)) in &c.overlaps_with_default {
                     println!(
                         "  {:<32}  override: ${:.4} in / ${:.4} out  |  default: ${:.4} in / ${:.4} out",
                         name, in_r, out_r, def_in, def_out
@@ -2483,12 +2483,14 @@ fn run_cost(
             let entry = by_key.entry(r.key.clone()).or_insert(cost::CostRow {
                 key: r.key.clone(),
                 cost_usd: 0.0,
+                cache_cost_usd: 0.0,
                 sessions: 0,
                 input_tokens: 0,
                 output_tokens: 0,
                 cache_read_tokens: 0,
             });
             entry.cost_usd += r.cost_usd;
+            entry.cache_cost_usd += r.cache_cost_usd;
             entry.sessions += r.sessions;
             entry.input_tokens += r.input_tokens;
             entry.output_tokens += r.output_tokens;
